@@ -298,3 +298,19 @@ func TestTextCappedAfterScrub(t *testing.T) {
 		t.Errorf("short message altered: %q", got)
 	}
 }
+
+func TestUnclassifiedNotFoundTextMapsToNotFound(t *testing.T) {
+	for _, msg := range []string{
+		"HTTP request failed with status 500: SOAP fault: [Receiver] Handler error: preset not found: p9",
+		"fault ter:NoEntity",
+		"ter:NoProfile",
+	} {
+		te := FromError(errors.New(msg), "c", "ptz.goto_preset")
+		if te.Code != CodeNotFound {
+			t.Errorf("%q: code = %s, want not_found", msg, te.Code)
+		}
+	}
+	if te := FromError(errors.New("boom"), "c", "x"); te.Code != CodeInternal {
+		t.Errorf("plain error must stay internal, got %s", te.Code)
+	}
+}

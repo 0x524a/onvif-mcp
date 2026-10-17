@@ -121,11 +121,29 @@ func fromError(err error, camera, operation string) *ToolError {
 		errors.Is(err, onvif.ErrInvalidEndpoint),
 		errors.Is(err, onvif.ErrInvalidEndpointFormat):
 		te.Code = CodeInvalidArgument
+	case isNotFoundText(err.Error()):
+		// onvif-go surfaces some SOAP faults, such as an unknown preset token, as a
+		// plain wrapped HTTP 500 error with no sentinel. Classify on the text.
+		te.Code = CodeNotFound
+		te.Hint = "list the available tokens first, then pass one of them"
 	default:
 		te.Code = CodeInternal
 	}
 	te.Retryable = te.Code.Retryable()
 	return te
+}
+
+// isNotFoundText reports whether an unclassified error's text says a token or
+// entity does not exist, including the ONVIF fault subcodes NoEntity, NoProfile
+// and NoToken.
+func isNotFoundText(s string) bool {
+	l := strings.ToLower(s)
+	for _, k := range []string{"not found", "noentity", "noprofile", "notoken", "no such"} {
+		if strings.Contains(l, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // FromStreamError maps an rtspeek error onto the taxonomy, reusing rtspeek's
