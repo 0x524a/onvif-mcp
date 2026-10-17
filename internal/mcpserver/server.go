@@ -106,6 +106,39 @@ func argumentErrors(next mcp.MethodHandler) mcp.MethodHandler {
 	}
 }
 
+// auditRejected is receiving middleware that audits a call to a gated write
+// tool which never reached the tool's handler, such as one the SDK refused for
+// failing schema validation. The handler audits every call that reaches it, so
+// this adds a record only for the rest. It must be the outermost middleware so
+// that it sees those failures. It reads no arguments.
+func auditRejected(p *safety.Policy) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			sr, ok := req.(*mcp.ServerRequest[*mcp.CallToolParamsRaw])
+			if method != "tools/call" || !ok || sr.Params == nil {
+				return next(ctx, method, req)
+			}
+			name := sr.Params.Name
+			gated := false
+			for _, g := range p.GatedTools() {
+				if g == name {
+					gated = true
+					break
+				}
+			}
+			if !gated {
+				return next(ctx, method, req)
+			}
+			ctx, attempt := safety.TrackAttempt(ctx)
+			res, err := next(ctx, method, req)
+			if !attempt.Reached() {
+				p.AuditRejected(name)
+			}
+			return res, err
+		}
+	}
+}
+
 // New builds the server and registers the tool surface and the policy
 // resource. policy gates write tools (tools.GuardedTool) and is what the
 // onvif://server/policy resource describes; nil behaves as read-only. The
@@ -119,7 +152,9 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 		Name:    "onvif-mcp",
 		Version: version,
 	}, nil)
-	srv.AddReceivingMiddleware(argumentErrors)
+	// The first middleware added is the outermost. auditRejected must wrap
+	// everything, including the SDK's own argument validation.
+	srv.AddReceivingMiddleware(auditRejected(policy), argumentErrors)
 	deps := tools.Deps{Reg: reg, Log: log, Base: o.base, Policy: policy}
 
 	// Always tools.GuardedTool (which wraps the generic free function), never

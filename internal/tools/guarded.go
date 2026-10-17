@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"runtime"
+	"strings"
 	"sync"
 	"weak"
 
@@ -136,6 +137,10 @@ func claimName(srv *mcp.Server, name string) {
 	set[name] = struct{}{}
 }
 
+// sentUnknownHint is appended to a device fault that follows a real write: the
+// command left the server, so "it failed" does not mean "nothing changed".
+const sentUnknownHint = "The command was sent to the camera before this failed, so the camera's state is unknown; check it with a read tool before repeating the call."
+
 // cancelled audits and reports a call that was stopped before it started.
 func cancelled[Data any](d Deps, tool, camera, shown string, dry bool) (*mcp.CallToolResult, mcperr.Out[Data], error) {
 	d.Policy.Audit(tool, camera, dry, false, "cancelled")
@@ -153,6 +158,7 @@ func guardedHandler[In, Data any](
 	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (
 		res *mcp.CallToolResult, out mcperr.Out[Data], err error,
 	) {
+		safety.NoteReached(ctx)
 		wi, ok := any(in).(safety.WriteInput)
 		if !ok {
 			// Unreachable after the registration check; fail closed anyway.
@@ -212,6 +218,21 @@ func guardedHandler[In, Data any](
 			outcome = "dry_run"
 		default:
 			outcome = "ok"
+		}
+		if err != nil {
+			return res, out, err
+		}
+		// Sanitise here, before the deferred audit, so the audited outcome is
+		// the one the client is told. (add sanitises again, harmlessly.)
+		if finishOut(&out) {
+			outcome = string(mcperr.CodeDeviceFault)
+			res, out, err = fail[Data](nonFiniteError())
+		}
+		finishText(res)
+		if executed && out.Error != nil && out.Error.Code == mcperr.CodeDeviceFault {
+			te := out.Error
+			te.Hint = strings.TrimSpace(te.Hint + " " + sentUnknownHint)
+			res, out, err = fail[Data](te)
 		}
 		return res, out, err
 	}

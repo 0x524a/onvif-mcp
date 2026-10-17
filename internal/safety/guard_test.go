@@ -2,6 +2,7 @@ package safety
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -363,7 +364,8 @@ func TestAuditHasNoArgumentOrSecretFields(t *testing.T) {
 	p.Audit(tool, "cam-a", false, true, "ok")
 	p.Evaluate("nope", tool, false)
 	allowed := map[string]bool{"time": true, "level": true, "msg": true, "tool": true, "camera": true,
-		"control_enabled": true, "dry_run": true, "executed": true, "outcome": true, "blocked": true, "reason": true}
+		"control_enabled": true, "dry_run": true, "executed": true, "outcome": true, "blocked": true, "reason": true,
+		"camera_granted": true, "target": true}
 	for _, r := range buf.records(t) {
 		for k := range r {
 			if !allowed[k] {
@@ -437,5 +439,72 @@ func TestAuditCleanMarksEveryCutAndKeepsShortText(t *testing.T) {
 	}
 	if got := clean(strings.Repeat("x", 100), 64); len(got) != 64 || !strings.HasSuffix(got, "...") {
 		t.Errorf("clean = %q", got)
+	}
+}
+
+func TestAuditRecordsWhetherTheCameraWasGranted(t *testing.T) {
+	p, buf, _ := newPolicy(true)
+	p.Audit(tool, "cam-a", false, true, "ok")
+	p.Audit(tool, "cam-fixed", true, false, "dry_run")
+	p.Audit(tool, "nope", true, false, "dry_run")
+	p.Evaluate("cam-fixed", tool, false) // refused: not granted
+	recs := buf.records(t)
+	want := []bool{true, false, false, false}
+	for i, r := range recs {
+		if r["camera_granted"] != want[i] {
+			t.Errorf("record %d camera_granted = %v, want %v: %v", i, r["camera_granted"], want[i], r)
+		}
+	}
+	if len(recs) != len(want) {
+		t.Fatalf("records = %d", len(recs))
+	}
+}
+
+func TestAuditTargetIsOptionalScrubbedAndBounded(t *testing.T) {
+	p, buf, _ := newPolicy(true)
+	p.Audit(tool, "cam-a", false, true, "ok")
+	p.Audit(tool, "cam-a", false, true, "ok", WithTarget("preset-3"))
+	p.Audit(tool, "cam-a", false, true, "ok", WithTarget("http://admin:s3cretpw@h/"+strings.Repeat("x", 500)))
+	recs := buf.records(t)
+	if _, has := recs[0]["target"]; has {
+		t.Errorf("no target given, none expected: %v", recs[0])
+	}
+	if recs[1]["target"] != "preset-3" {
+		t.Errorf("target = %v", recs[1]["target"])
+	}
+	long, _ := recs[2]["target"].(string)
+	if strings.Contains(long, "s3cretpw") || len(long) > 64 || !strings.HasSuffix(long, "...") {
+		t.Errorf("target not scrubbed and bounded: %q", long)
+	}
+}
+
+func TestAuditRejectedLogsAWarnWithoutArguments(t *testing.T) {
+	p, buf, _ := newPolicy(true)
+	p.AuditRejected(tool)
+	r := buf.records(t)
+	if len(r) != 1 {
+		t.Fatalf("records = %v", r)
+	}
+	a := r[0]
+	if a["level"] != "WARN" || a["tool"] != tool || a["blocked"] != true || a["executed"] != false ||
+		a["reason"] != ReasonInvalidArguments || a["outcome"] != "blocked" {
+		t.Errorf("record = %v", a)
+	}
+	if _, has := a["camera"]; has {
+		t.Errorf("a rejected call's camera is unvalidated and must not be logged: %v", a)
+	}
+	var nilPolicy *Policy
+	nilPolicy.AuditRejected(tool) // must not panic
+}
+
+func TestAttemptTrackerSeesHandlerReach(t *testing.T) {
+	ctx, tr := TrackAttempt(context.Background())
+	if tr.Reached() {
+		t.Fatal("not reached yet")
+	}
+	NoteReached(context.Background()) // no tracker: must not panic
+	NoteReached(ctx)
+	if !tr.Reached() {
+		t.Fatal("reach not recorded")
 	}
 }

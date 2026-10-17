@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -398,5 +399,66 @@ func TestSchemaForAWriteToolDocumentsDryRun(t *testing.T) {
 	b, _ := json.Marshal(r.listed(t)["test.nudge"].InputSchema)
 	if !strings.Contains(string(b), "dry_run") || !strings.Contains(string(b), "defaults to true") {
 		t.Errorf("schema = %s", b)
+	}
+}
+
+type nanOut struct {
+	V float64 `json:"v" jsonschema:"a number"`
+}
+
+// The audit trail must say what the client was told, and for a write that was
+// sent the client must be told the camera's state is unknown.
+func TestNonFiniteResultIsAuditedAsDeviceFaultAndSaysTheCommandWasSent(t *testing.T) {
+	audit := &auditBuf{}
+	reg := registry.New(&config.Config{Cameras: map[string]*config.Camera{
+		"cam-a": {ID: "cam-a", Endpoint: "http://192.0.2.1/onvif/device_service", Control: true},
+	}})
+	policy := safety.NewPolicy(safety.PolicyOptions{ControlEnabled: true, Cameras: reg, Interval: time.Hour,
+		Log: slog.New(slog.NewJSONHandler(audit, nil))})
+	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	GuardedTool(srv, Deps{Reg: reg, Log: quietLog(), Policy: policy}, safety.RiskWrite,
+		&mcp.Tool{Name: "test.nan", Description: "x"},
+		func(context.Context, *mcp.CallToolRequest, nudgeIn) (*mcp.CallToolResult, mcperr.Out[nanOut], error) {
+			return nil, mcperr.OK(nanOut{V: math.NaN()}), nil
+		},
+		func(context.Context, *mcp.CallToolRequest, nudgeIn) (*mcp.CallToolResult, mcperr.Out[nanOut], error) {
+			return nil, mcperr.OK(nanOut{}), nil
+		})
+	res := call(t, connectTo(t, srv), "test.nan", map[string]any{"camera": "cam-a", "dry_run": false})
+	code, hint := errCode(t, res)
+	if code != "device_fault" || !strings.Contains(hint, "sent") || !strings.Contains(hint, "unknown") {
+		t.Fatalf("code=%q hint=%q", code, hint)
+	}
+	recs := audit.records(t)
+	a := recs[len(recs)-1]
+	if a["outcome"] != "device_fault" || a["executed"] != true {
+		t.Errorf("audit = %v", a)
+	}
+}
+
+func TestDeviceFaultAfterASentWriteSaysTheStateIsUnknown(t *testing.T) {
+	reg := registry.New(&config.Config{Cameras: map[string]*config.Camera{
+		"cam-a": {ID: "cam-a", Endpoint: "http://192.0.2.1/onvif/device_service", Control: true},
+	}})
+	policy := safety.NewPolicy(safety.PolicyOptions{ControlEnabled: true, Cameras: reg, Log: quietLog()})
+	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	fault := func(context.Context, *mcp.CallToolRequest, nudgeIn) (*mcp.CallToolResult, mcperr.Out[nudgeOut], error) {
+		return fail[nudgeOut](&mcperr.ToolError{Code: mcperr.CodeDeviceFault, Message: "soap fault", Hint: "try later"})
+	}
+	GuardedTool(srv, Deps{Reg: reg, Log: quietLog(), Policy: policy}, safety.RiskWrite,
+		&mcp.Tool{Name: "test.fault", Description: "x"}, fault, fault)
+	cs := connectTo(t, srv)
+
+	res := call(t, cs, "test.fault", map[string]any{"camera": "cam-a", "dry_run": false})
+	if _, hint := errCode(t, res); !strings.Contains(hint, "try later") || !strings.Contains(hint, "sent") || !strings.Contains(hint, "unknown") {
+		t.Errorf("real call hint = %q", hint)
+	}
+	if !strings.Contains(wire(t, res), "unknown") {
+		t.Errorf("text content lost the warning: %s", wire(t, res))
+	}
+	// A dry run sent nothing, so it must not claim otherwise.
+	res = call(t, cs, "test.fault", map[string]any{"camera": "cam-a"})
+	if _, hint := errCode(t, res); strings.Contains(hint, "sent") {
+		t.Errorf("dry run hint = %q", hint)
 	}
 }

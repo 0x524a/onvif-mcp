@@ -172,13 +172,18 @@ func add[In, Data any](srv *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, mc
 			return res, out, err
 		}
 		if finishOut(&out) {
-			return fail[Data](&mcperr.ToolError{
-				Code:    mcperr.CodeDeviceFault,
-				Message: "the camera reported a number that is not finite (NaN or infinity)",
-				Hint:    "the camera firmware is misbehaving; try another operation or report it to the camera vendor",
-			})
+			return fail[Data](nonFiniteError())
 		}
 		finishText(res)
 		return res, out, nil
 	})
+}
+
+// nonFiniteError is the error for a result holding NaN or infinity.
+func nonFiniteError() *mcperr.ToolError {
+	return &mcperr.ToolError{
+		Code:    mcperr.CodeDeviceFault,
+		Message: "the camera reported a number that is not finite (NaN or infinity)",
+		Hint:    "the camera firmware is misbehaving; try another operation or report it to the camera vendor",
+	}
 }

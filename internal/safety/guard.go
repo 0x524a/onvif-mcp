@@ -19,7 +19,7 @@ const (
 	ReasonCameraNotGranted = "camera_not_granted"
 	ReasonRateLimited      = "rate_limited"
 	ReasonNoRateLimiter    = "no_rate_limiter"
-	ReasonNoAuditLog       = "no_audit_log"
+	ReasonInvalidArguments = "invalid_arguments"
 )
 
 // CameraLookup resolves a camera id to its registry entry. *registry.Registry
