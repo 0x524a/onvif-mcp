@@ -91,6 +91,7 @@ const (
 	hintGateway     = "the camera or a gateway in front of it is temporarily unavailable; retry shortly"
 	hintTLS         = "endpoint scheme or certificate mismatch; check http vs https in the configured endpoint and the camera's certificate"
 	hintGarbage     = "the endpoint answered with something that is not an ONVIF SOAP response; check the configured port and scheme"
+	hintBadNumber   = "the camera sent a number that cannot be represented; its reply is malformed and the field cannot be read"
 	hintCancelled   = "the call was cancelled before the camera answered"
 )
 
@@ -143,6 +144,10 @@ func classifyTransport(err error) (verdict, bool) {
 	}
 	if strings.Contains(l, "server gave http response to https client") || strings.Contains(l, "x509:") || strings.Contains(l, "tls:") || (strings.Contains(l, "tls handshake") && !strings.Contains(l, "timeout")) {
 		return verdict{CodeInvalidArgument, hintTLS}, true
+	}
+	var ne0 *strconv.NumError
+	if errors.Is(err, strconv.ErrRange) || errors.As(err, &ne0) {
+		return verdict{CodeDeviceFault, hintBadNumber}, true
 	}
 	if strings.Contains(l, "malformed http") || strings.Contains(l, "readlooppeekfaillocked") || strings.Contains(l, "unmarshal soap envelope") {
 		return verdict{CodeDeviceFault, hintGarbage}, true
