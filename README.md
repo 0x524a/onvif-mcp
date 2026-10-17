@@ -17,18 +17,40 @@ Requires Go 1.25 or newer. The command is not published until the first release.
 
 ## Configure
 
-Cameras are declared in a config file addressed by operator-chosen IDs. Credentials live
-in the config file or the environment, never in tool arguments. Each camera must opt in to
-control, and control tools stay disabled unless the server is started with
-`--enable-control`.
+Cameras are declared in a JSON config file addressed by operator-chosen IDs. Credentials
+live in the config file or the environment, never in tool arguments. Each camera must opt
+in to control (`"control": true`), and control tools stay disabled unless the server is
+started with `-enable-control`.
+
+A documentation-only example is in [testdata/cameras.example.json](testdata/cameras.example.json),
+using the reserved address `192.0.2.10` and `REPLACE_ME` credentials. Copy it, edit it, and
+restrict its permissions:
+
+```bash
+cp testdata/cameras.example.json cameras.json
+chmod 600 cameras.json
+```
+
+The server refuses to start if the config file is readable by group or other, because it
+holds credentials. Git does not preserve the owner-only mode, so a fresh clone or copy
+needs the `chmod` above.
 
 ## Run
 
 ```bash
-onvif-mcp --config cameras.json
+onvif-mcp -config cameras.json
 ```
 
-The server speaks MCP over stdio. All logging goes to stderr.
+| Flag | Meaning |
+|------|---------|
+| `-config PATH` | Camera config file. Required. |
+| `-enable-control` | Permit state-changing tools (each camera must also opt in). |
+| `-version` | Print the version to stdout and exit without starting the server. |
+
+The server speaks MCP over stdio: stdout carries only JSON-RPC, and all logging goes to
+stderr. Exit codes: 0 on a clean shutdown (stdin closed, SIGINT or SIGTERM), 1 for a
+configuration or runtime failure (including a config file with loose permissions), 2 for a
+usage error such as an unknown flag or a missing `-config`.
 
 ## Tools
 
