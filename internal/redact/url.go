@@ -148,8 +148,16 @@ var (
 		`((?:proxy-?)?authorization|www-authenticate|proxy-authenticate|authentication-info)([ \t]*:[ \t]*)(?:([A-Za-z][A-Za-z0-9\-]*)[ \t]+)?[^\r\n]*`)
 	// JSON "key":"value", plain and backslash-escaped (JSON embedded in a
 	// string).
-	jsonKeyRe = regexp.MustCompile(`"([^"\\]{1,64})"[ \t\r\n]*:[ \t\r\n]*`)
+	// The key excludes '/', '&', '=' and '?': a quoted URL followed by ": dial
+	// tcp" is not a JSON key, and treating it as one swallowed the diagnostics.
+	jsonKeyRe = regexp.MustCompile(`"([^"\\/&=?]{1,64})"[ \t\r\n]*:[ \t\r\n]*`)
 	escJSONRe = regexp.MustCompile(`(\\"([^"\\]{1,64})\\"[ \t]*:[ \t]*)(\\"(?:[^"\\]|\\[^"])*\\"|[^\s,}\]"\\]+)`)
+
+	// WS-Security UsernameToken parts echoed in a fault body: the element text
+	// of Password (including PasswordDigest), Nonce and Created, under any
+	// namespace prefix and with any attributes. A self-closing element has no
+	// text and is left alone.
+	wsseRe = regexp.MustCompile(`(?is)(<(?:[\w.\-]+:)?(?:Password\w*|Nonce|Created)(?:\s[^>]*[^/>])?>)[^<]+`)
 
 	tokenRe = regexp.MustCompile(`\S+`)
 )
@@ -193,6 +201,7 @@ func Scrub(s string) string {
 }
 
 func scrubPatterns(s string) string {
+	s = wsseRe.ReplaceAllString(s, "${1}REDACTED")
 	s = scrubJSON(s)
 	s = escJSONRe.ReplaceAllStringFunc(s, func(m string) string {
 		sub := escJSONRe.FindStringSubmatch(m)
