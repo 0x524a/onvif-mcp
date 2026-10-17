@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/0x524A/rtspeek/pkg/rtspeek"
 	onvif "github.com/0x524a/onvif-go"
@@ -36,16 +37,37 @@ func FromError(err error, camera, operation string) *ToolError {
 	return sanitize(fromError(err, camera, operation))
 }
 
-// sanitize scrubs every free-text field of te, as defence in depth: no
-// constructor path may emit credentials regardless of where the text came from.
+// maxTextLen bounds every free-text field of a ToolError, in bytes.
+const maxTextLen = 4096
+
+const ellipsis = "\u2026"
+
+// cleanText scrubs s and then truncates the result to maxTextLen bytes with a
+// trailing ellipsis. Scrubbing must come first: truncating before Scrub could
+// split a secret and leave a fragment Scrub no longer recognises.
+func cleanText(s string) string {
+	s = redact.Scrub(s)
+	if len(s) <= maxTextLen {
+		return s
+	}
+	cut := maxTextLen - len(ellipsis)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + ellipsis
+}
+
+// sanitize scrubs and length-caps every free-text field of te, as defence in
+// depth: no constructor path may emit credentials regardless of where the
+// text came from.
 func sanitize(te *ToolError) *ToolError {
-	te.Message = redact.Scrub(te.Message)
-	te.Hint = redact.Scrub(te.Hint)
-	te.Camera = redact.Scrub(te.Camera)
-	te.Operation = redact.Scrub(te.Operation)
+	te.Message = cleanText(te.Message)
+	te.Hint = cleanText(te.Hint)
+	te.Camera = cleanText(te.Camera)
+	te.Operation = cleanText(te.Operation)
 	if te.SOAP != nil {
-		te.SOAP.Code = redact.Scrub(te.SOAP.Code)
-		te.SOAP.Reason = redact.Scrub(te.SOAP.Reason)
+		te.SOAP.Code = cleanText(te.SOAP.Code)
+		te.SOAP.Reason = cleanText(te.SOAP.Reason)
 	}
 	return te
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/0x524A/rtspeek/pkg/rtspeek"
 	onvif "github.com/0x524a/onvif-go"
+	"github.com/0x524a/onvif-mcp/internal/redact"
 )
 
 func TestONVIFErrorCheckedBeforeSentinels(t *testing.T) {
@@ -276,4 +277,24 @@ func TestONVIFErrorBracketedNetPathScrubbed(t *testing.T) {
 	assertNoLeak(t, te)
 	te = FromError(onvif.NewONVIFError("ter:Action", "//admin:SECRETPW@h", "x"), "cam", "Op")
 	assertNoLeak(t, te)
+}
+
+func TestTextCappedAfterScrub(t *testing.T) {
+	redact.RegisterSecret("p4ss-w0rd-xyz")
+	// Place the secret straddling the 4096-byte boundary: truncating before
+	// scrubbing would leave a fragment.
+	long := strings.Repeat("a", 4090) + "p4ss-w0rd-xyz" + strings.Repeat("b", 100)
+	te := FromError(errors.New(long), "cam", "op")
+	if len(te.Message) > maxTextLen {
+		t.Errorf("message not capped: %d bytes", len(te.Message))
+	}
+	if !strings.HasSuffix(te.Message, "…") {
+		t.Errorf("no ellipsis: %q", te.Message[len(te.Message)-10:])
+	}
+	if strings.Contains(te.Message, "p4") {
+		t.Errorf("secret fragment leaked: %q", te.Message[len(te.Message)-30:])
+	}
+	if got := Blocked("cam", "op", "short", nil).Message; got != "short" {
+		t.Errorf("short message altered: %q", got)
+	}
 }

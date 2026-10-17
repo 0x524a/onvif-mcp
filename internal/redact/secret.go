@@ -18,6 +18,8 @@ const minSecretLen = 3
 var (
 	secretsMu  sync.RWMutex
 	registered = map[string]struct{}{}
+	// formSet is the union of secretForms over registered.
+	formSet = map[string]struct{}{}
 	// replacer replaces every literal form of every registered secret. It is
 	// rebuilt on registration and is safe for concurrent use once built.
 	replacer *strings.Replacer
@@ -71,6 +73,11 @@ func secretForms(r string) []string {
 	return forms
 }
 
+// maxSecrets bounds the number of distinct registered secrets. A deployment
+// has one password per camera; the cap is a safety bound that keeps the
+// per-registration rebuild cheap and the replacer small.
+const maxSecrets = 256
+
 // RegisterSecret records s as a secret that Scrub must remove wherever it
 // appears, in any text, whether or not it sits inside a URL or key=value
 // pair. Scrub replaces s literally, plus its url.QueryEscape, url.PathEscape
@@ -80,31 +87,37 @@ func secretForms(r string) []string {
 //
 // Config loading MUST register every camera password (and any other secret
 // it reads) as soon as it is known; this is the only defence for a secret
-// that appears in free-form prose. Empty strings and strings shorter than 3
-// bytes are ignored. Calls are idempotent and safe for concurrent use.
-func RegisterSecret(s string) {
+// that appears in free-form prose. Calls are idempotent and safe for
+// concurrent use.
+//
+// It returns true when s is covered by Scrub afterwards (newly registered or
+// already registered). It returns false, registering nothing, when s is
+// shorter than 3 bytes or when 256 distinct secrets are already registered;
+// callers should treat false as a configuration error.
+func RegisterSecret(s string) bool {
 	if len(s) < minSecretLen {
-		return
+		return false
 	}
 	secretsMu.Lock()
 	defer secretsMu.Unlock()
 	if _, ok := registered[s]; ok {
-		return
+		return true
+	}
+	if len(registered) >= maxSecrets {
+		return false
 	}
 	registered[s] = struct{}{}
-
-	seen := map[string]struct{}{}
-	var all []string
-	for r := range registered {
-		for _, f := range secretForms(r) {
-			if len(f) < minSecretLen {
-				continue
-			}
-			if _, dup := seen[f]; !dup {
-				seen[f] = struct{}{}
-				all = append(all, f)
-			}
+	// Only the new secret's forms are computed; earlier ones are kept in
+	// formSet, so each call costs one sort and one replacer build.
+	for _, f := range secretForms(s) {
+		if len(f) >= minSecretLen {
+			formSet[f] = struct{}{}
 		}
+	}
+
+	all := make([]string, 0, len(formSet))
+	for f := range formSet {
+		all = append(all, f)
 	}
 	// Longest first, so a secret that is a substring of another cannot
 	// expose the remainder of the longer one.
@@ -119,6 +132,7 @@ func RegisterSecret(s string) {
 		pairs = append(pairs, f, "REDACTED")
 	}
 	replacer = strings.NewReplacer(pairs...)
+	return true
 }
 
 // scrubRegistered replaces every registered secret form in s.

@@ -11,7 +11,25 @@
 // appears, in the raw, URL-escaped, JSON-escaped and Go-quoted forms it
 // documents.
 //
-// Explicit non-goals: free-form prose that contains a secret which is neither
+// Explicit non-goals, stated so nobody mistakes best-effort for a guarantee:
+//
+//   - key=value redaction consumes one whitespace-delimited token. A
+//     multi-word value in that form ("password=two words") leaves the rest;
+//     only the colon text form ("password: two words") redacts to end of line.
+//   - Keys not in the sensitive list are not recognised.
+//   - Path-style key forms ("/password/hunter2") are not recognised.
+//   - Raw whitespace combined with an encoded '@' inside a password is not
+//     reliably parsed as userinfo.
+//   - HTML-entity, %u and \x40 style encodings are not decoded.
+//   - Doubly-escaped or partially encoded registered secrets are removed only
+//     in the exact forms RegisterSecret documents.
+//   - Over-redaction is accepted: a false positive costs a diagnostic, a miss
+//     leaks ("passed=3" becomes "passed=REDACTED").
+//   - Performance: Scrub is linear in input size but slow, roughly 3 s per
+//     MB, so callers should length-cap error text they feed it.
+//   - Registered secrets are capped at 256 distinct entries.
+//
+// Also out of scope: free-form prose that contains a secret which is neither
 // inside a URL or a recognised key=value, "key": value or "key: value" form,
 // nor registered via RegisterSecret, is not detected. Nor are secrets
 // transformed beyond those encodings (base64, hashes, upper-casing,
@@ -84,7 +102,7 @@ func (r URL) Unredacted() string {
 var sensitiveSubstrings = []string{
 	"pass", "pwd", "pw", "token", "secret", "key", "auth", "cred",
 	"sig", "sid", "nonce", "response",
-	"pin", "code", "session", "cookie",
+	"pin", "code", "session", "cookie", "jwt", "bearer",
 }
 
 // colonSubstrings is the subset used for the "key: value" text form, where a
@@ -92,7 +110,7 @@ var sensitiveSubstrings = []string{
 // prose ("unexpected response: 500") than a credential.
 var colonSubstrings = []string{
 	"pass", "pwd", "pw", "token", "secret", "cred", "nonce", "apikey",
-	"authorization", "authenticate", "authentication", "cookie",
+	"authorization", "authenticate", "authentication", "cookie", "jwt", "bearer",
 }
 
 const (
