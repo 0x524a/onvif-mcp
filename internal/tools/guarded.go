@@ -2,6 +2,9 @@ package tools
 
 import (
 	"context"
+	"runtime"
+	"sync"
+	"weak"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -11,7 +14,7 @@ import (
 
 // GuardedTool is the registration path for any tool that must declare whether
 // it can change a camera. It requires a safety.RiskClass, so a write tool
-// cannot be added without saying so, and it registers only through Add, so
+// cannot be added without saying so, and it registers only through add, so
 // every result still passes the sanitising choke point and the SDK's generic
 // registration (input validation, tool-error semantics) is never bypassed.
 //
@@ -61,8 +64,18 @@ func GuardedTool[In, Data any](
 		if dryRun != nil {
 			panic("tools.GuardedTool: " + t.Name + ": a read tool has no dry-run function")
 		}
+		var zero In
+		if _, ok := any(zero).(safety.WriteInput); ok {
+			panic("tools.GuardedTool: " + t.Name + ": an input embedding safety.WriteBase must be registered as RiskWrite")
+		}
+		claimName(srv, t.Name)
 		tc.Annotations = ReadOnly(title)
-		Add(srv, &tc, run)
+		if t.Annotations != nil && t.Annotations.OpenWorldHint != nil {
+			// The one hint a read tool may choose: discovery reaches
+			// whatever answers on the network.
+			tc.Annotations.OpenWorldHint = boolPtr(*t.Annotations.OpenWorldHint)
+		}
+		add(srv, &tc, run)
 
 	case safety.RiskWrite:
 		var zero In
@@ -73,15 +86,50 @@ func GuardedTool[In, Data any](
 			panic("tools.GuardedTool: " + t.Name + ": a write tool requires a separate dry-run function")
 		}
 		tc.Annotations = safety.WriteAnnotations(title)
+		claimName(srv, t.Name)
 		d.Policy.NoteGated(t.Name)
 		if !d.Policy.WriteRegistered() {
 			return
 		}
-		Add(srv, &tc, guardedHandler(d, t.Name, run, dryRun))
+		add(srv, &tc, guardedHandler(d, t.Name, run, dryRun))
 
 	default:
 		panic("tools.GuardedTool: " + t.Name + ": unknown risk class")
 	}
+}
+
+// readTool registers a read-only tool through GuardedTool.
+func readTool[In, Data any](srv *mcp.Server, d Deps, t *mcp.Tool, h mcp.ToolHandlerFor[In, mcperr.Out[Data]]) {
+	GuardedTool(srv, d, safety.RiskRead, t, h, nil)
+}
+
+var (
+	namesMu sync.Mutex
+	names   = map[weak.Pointer[mcp.Server]]map[string]struct{}{}
+)
+
+// claimName records that srv has a tool called name, and panics if it already
+// did: the SDK keeps tools in a map, so a second registration would silently
+// replace a guarded handler with whatever came later. A write tool that is
+// skipped because control is off still claims its name.
+func claimName(srv *mcp.Server, name string) {
+	key := weak.Make(srv)
+	namesMu.Lock()
+	defer namesMu.Unlock()
+	set, ok := names[key]
+	if !ok {
+		set = map[string]struct{}{}
+		names[key] = set
+		runtime.AddCleanup(srv, func(k weak.Pointer[mcp.Server]) {
+			namesMu.Lock()
+			delete(names, k)
+			namesMu.Unlock()
+		}, key)
+	}
+	if _, dup := set[name]; dup {
+		panic("tools.GuardedTool: " + name + ": a tool with this name is already registered")
+	}
+	set[name] = struct{}{}
 }
 
 // guardedHandler wraps run and dryRun in the guard. See GuardedTool.

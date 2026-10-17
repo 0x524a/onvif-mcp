@@ -168,7 +168,7 @@ func streamURIOf(camera string, u *onvif.MediaURI) (StreamURIData, *mcperr.ToolE
 // RegisterMedia registers media.profiles and media.stream_uri.
 func RegisterMedia(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetProfiles, media.go.
-	Add(srv, &mcp.Tool{
+	readTool(srv, d, &mcp.Tool{
 		Name: "media.profiles",
 		Description: "Use this after camera.list to learn a camera's media profiles; it is the source of the " +
 			"profile tokens and source tokens the other tools ask for. Each profile has token (pass it as " +
@@ -195,7 +195,7 @@ func RegisterMedia(srv *mcp.Server, d Deps) {
 	})
 
 	// onvif-go: (*Client).GetStreamURI, media.go.
-	Add(srv, &mcp.Tool{
+	readTool(srv, d, &mcp.Tool{
 		Name: "media.stream_uri",
 		Description: "Use this after media.profiles to get the RTSP address of a profile, for example to hand " +
 			"to a human or a player. Credentials are never included, in the URI or anywhere else; they stay " +

@@ -154,16 +154,18 @@ func finishText(res *mcp.CallToolResult) {
 	}
 }
 
-// Add registers a tool whose handler returns the mcperr envelope, passing
+// add registers a tool whose handler returns the mcperr envelope, passing
 // every result through the one sanitising step: Scrub, control-character
 // stripping and length clipping on every string, and removal of non-finite
-// numbers. Every tool must be registered through Add, never mcp.AddTool
-// directly, so that a new tool cannot forget (a test enforces this).
+// numbers.
 //
-// It is always the generic free function mcp.AddTool underneath, never the
-// srv.AddTool method: the method skips input validation and turns handler
-// errors into protocol errors (go-sdk v1.7.0 server.go).
-func Add[In, Data any](srv *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, mcperr.Out[Data]]) {
+// It is the only place in the module that calls the SDK's AddTool, and only
+// GuardedTool calls it, so a tool cannot be registered without declaring a
+// risk class (tests enforce both). It is always the generic free function
+// mcp.AddTool underneath, never the srv.AddTool method: the method skips input
+// validation and turns handler errors into protocol errors (go-sdk v1.7.0
+// server.go).
+func add[In, Data any](srv *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, mcperr.Out[Data]]) {
 	mcp.AddTool(srv, t, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, mcperr.Out[Data], error) {
 		res, out, err := h(ctx, req, in)
 		if err != nil {

@@ -194,7 +194,7 @@ func configTokenFor(ps []*onvif.Profile, profile string) string {
 // RegisterPTZReads registers ptz.status and ptz.presets.
 func RegisterPTZReads(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetStatus, ptz.go.
-	Add(srv, &mcp.Tool{
+	readTool(srv, d, &mcp.Tool{
 		Name: "ptz.status",
 		Description: "Use this to see where a camera is pointing and whether it is moving. Call media.profiles first " +
 			"and pass the token of a profile with has_ptz true as profile. Pan and tilt are normalised -1 to 1 " +
@@ -222,7 +222,7 @@ func RegisterPTZReads(srv *mcp.Server, d Deps) {
 	})
 
 	// onvif-go: (*Client).GetPresets and (*Client).GetConfiguration, ptz.go; (*Client).GetProfiles, media.go.
-	Add(srv, &mcp.Tool{
+	readTool(srv, d, &mcp.Tool{
 		Name: "ptz.presets",
 		Description: "Use this to list the named positions stored on a camera, and its movement limits. Call " +
 			"media.profiles first and pass the token of a profile with has_ptz true as profile. Each preset has " +

@@ -3,9 +3,6 @@ package tools
 import (
 	"context"
 	"math"
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -86,12 +83,12 @@ type probePlain struct {
 	X float64 `json:"x"`
 }
 
-func TestAddSanitisesEveryStringInEveryShape(t *testing.T) {
+func TestSanitiseOnRegisterEveryStringInEveryShape(t *testing.T) {
 	registerLeakSecret(t)
 	bad := "x" + leakPW + "\nESC\x1b[2J" + strings.Repeat("z", 400)
 	nan, inf := math.NaN(), math.Inf(1)
 	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
-	Add(srv, &mcp.Tool{Name: "probe", Description: "d", Annotations: ReadOnly("p")},
+	add(srv, &mcp.Tool{Name: "probe", Description: "d", Annotations: ReadOnly("p")},
 		func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, mcperr.Out[probeOut], error) {
 			p := bad
 			iface := any(bad)
@@ -128,9 +125,9 @@ func TestAddSanitisesEveryStringInEveryShape(t *testing.T) {
 	}
 }
 
-func TestAddTurnsAPlainNonFiniteNumberIntoDeviceFault(t *testing.T) {
+func TestSanitiseTurnsAPlainNonFiniteNumberIntoDeviceFault(t *testing.T) {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
-	Add(srv, &mcp.Tool{Name: "plain", Description: "d", Annotations: ReadOnly("p")},
+	add(srv, &mcp.Tool{Name: "plain", Description: "d", Annotations: ReadOnly("p")},
 		func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, mcperr.Out[probePlain], error) {
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "x"}}}, mcperr.OK(probePlain{X: math.NaN()}), nil
 		})
@@ -143,10 +140,10 @@ func TestAddTurnsAPlainNonFiniteNumberIntoDeviceFault(t *testing.T) {
 	}
 }
 
-func TestAddSanitisesErrorEnvelopeAndText(t *testing.T) {
+func TestSanitiseOnRegisterErrorEnvelopeAndText(t *testing.T) {
 	registerLeakSecret(t)
 	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
-	Add(srv, &mcp.Tool{Name: "boom", Description: "d", Annotations: ReadOnly("p")},
+	add(srv, &mcp.Tool{Name: "boom", Description: "d", Annotations: ReadOnly("p")},
 		func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, mcperr.Out[probePlain], error) {
 			return fail[probePlain](&mcperr.ToolError{Code: mcperr.CodeDeviceFault, Message: "bad\x1b[31m " + leakPW,
 				SOAP: &mcperr.SOAPFault{Code: "c" + leakPW, Reason: "r\n" + leakPW}})
@@ -158,26 +155,5 @@ func TestAddSanitisesErrorEnvelopeAndText(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Error("IsError lost")
-	}
-}
-
-// Every tool must be registered through Add so that the choke point cannot be
-// forgotten by a newly added tool.
-func TestNoToolBypassesTheChokePoint(t *testing.T) {
-	re := regexp.MustCompile(`mcp\.AddTool\(|\.AddTool\(`)
-	for _, dir := range []string{".", "../mcpserver"} {
-		files, _ := filepath.Glob(filepath.Join(dir, "*.go"))
-		for _, f := range files {
-			if strings.HasSuffix(f, "_test.go") || filepath.Base(f) == "sanitize.go" {
-				continue
-			}
-			b, err := os.ReadFile(f) //nolint:gosec // fixed glob of this repo's own sources
-			if err != nil {
-				t.Fatal(err)
-			}
-			if re.Match(b) {
-				t.Errorf("%s registers a tool without tools.Add", f)
-			}
-		}
 	}
 }

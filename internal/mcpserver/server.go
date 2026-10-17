@@ -122,10 +122,11 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 	srv.AddReceivingMiddleware(argumentErrors)
 	deps := tools.Deps{Reg: reg, Log: log, Base: o.base, Policy: policy}
 
-	// Always tools.Add (which wraps the generic free function), never the srv.AddTool
-	// method: the method skips input validation and turns handler errors into
-	// protocol errors instead of tool errors (go-sdk v1.7.0 server.go).
-	tools.Add(srv, &mcp.Tool{
+	// Always tools.GuardedTool (which wraps the generic free function), never
+	// the srv.AddTool method: the method skips input validation and turns
+	// handler errors into protocol errors instead of tool errors (go-sdk
+	// v1.7.0 server.go).
+	tools.GuardedTool(srv, deps, safety.RiskRead, &mcp.Tool{
 		Name: "camera.list",
 		Description: "Use this first: it lists the cameras this server is configured with, and every other camera " +
 			"tool needs one of these ids as camera. Each entry has: id (the handle to use for other tools); " +
@@ -166,7 +167,7 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 			Content: []mcp.Content{&mcp.TextContent{Text: summarize(cams)}},
 		}
 		return res, mcperr.OK(ListData{Cameras: cams}), nil
-	})
+	}, nil)
 
 	tools.RegisterMedia(srv, deps)
 	tools.RegisterImaging(srv, deps)

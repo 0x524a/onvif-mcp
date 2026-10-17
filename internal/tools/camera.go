@@ -322,7 +322,7 @@ func servicesOf(svcs []*onvif.Service) (list []string, total int, truncated bool
 // RegisterCamera registers camera.describe and camera.discover.
 func RegisterCamera(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetDeviceInformation and (*Client).GetServices, device.go.
-	Add(srv, &mcp.Tool{
+	readTool(srv, d, &mcp.Tool{
 		Name: "camera.describe",
 		Description: "Use this to identify a configured camera and see which ONVIF services it claims to offer. " +
 			"Call camera.list first for the camera id. Returns manufacturer, model, firmware, serial and " +
@@ -367,7 +367,7 @@ func RegisterCamera(srv *mcp.Server, d Deps) {
 	})
 
 	// onvif-go: discovery.DiscoverWithOptions, discovery/discovery.go.
-	Add(srv, &mcp.Tool{
+	readTool(srv, d, &mcp.Tool{
 		Name: "camera.discover",
 		Description: "Use this only to look for cameras that are not yet configured; for the configured ones call " +
 			"camera.list. It probes the local network (WS-Discovery) for ONVIF devices and blocks for the whole " +

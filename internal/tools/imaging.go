@@ -53,7 +53,7 @@ func imagingOf(s *onvif.ImagingSettings) ImagingData {
 // RegisterImaging registers imaging.settings.
 func RegisterImaging(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetImagingSettings, imaging.go.
-	Add(srv, &mcp.Tool{
+	readTool(srv, d, &mcp.Tool{
 		Name: "imaging.settings",
 		Description: "Use this to read how a camera's image is tuned: brightness, color_saturation, contrast and " +
 			"sharpness of one video source. Call media.profiles first and pass a video_source_token from it " +
