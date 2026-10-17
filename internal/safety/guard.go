@@ -94,7 +94,8 @@ type PolicyOptions struct {
 	Cameras        CameraLookup
 	// Interval and Burst configure the per-camera rate limit: one movement per
 	// Interval, up to Burst at once. Zero values mean DefaultInterval (2s) and
-	// DefaultBurst (1).
+	// DefaultBurst (1). v0.1 deliberately has no flag or config key for them:
+	// main leaves them zero, so the defaults are what operators get.
 	Interval time.Duration
 	Burst    int
 	// Clock overrides the limiter's time source; nil means time.Now.
@@ -184,12 +185,14 @@ func (p *Policy) Evaluate(camera, tool string, dryRun bool) Decision {
 	}
 
 	if p.Log == nil {
+		// Nothing can be logged without a logger, so this refusal is the one
+		// that is not audited.
 		return Decision{Blocked: blocked(camera, tool,
-			"the audit trail is unavailable, so movement is refused", nil)}
+			"the audit trail is unavailable, so movement is refused", nil, misconfiguredHint)}
 	}
 	if p.Limiter == nil {
 		return refuse(blocked(camera, tool,
-			"no rate limiter is configured, so movement is refused", nil), ReasonNoRateLimiter)
+			"no rate limiter is configured, so movement is refused", nil, misconfiguredHint), ReasonNoRateLimiter)
 	}
 	if ok, after := p.Limiter.Allow(camera); !ok {
 		secs := int(math.Ceil(after.Seconds()))
@@ -202,6 +205,10 @@ func (p *Policy) Evaluate(camera, tool string, dryRun bool) Decision {
 	}
 	return Decision{}
 }
+
+// misconfiguredHint is for the fail-closed refusals that only a broken server
+// setup can reach.
+const misconfiguredHint = "this is a server misconfiguration; an operator must fix it, do not retry"
 
 func blocked(camera, tool, msg string, retryAfter *int, hint ...string) *mcperr.ToolError {
 	te := mcperr.Blocked(camera, tool, msg, retryAfter)

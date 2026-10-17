@@ -19,15 +19,19 @@ type policyBody struct {
 	HowToEnable        string        `json:"how_to_enable"`
 	DryRunDefault      bool          `json:"dry_run_default"`
 	Explanation        string        `json:"explanation"`
+	Why                string        `json:"why"`
 }
 
 // readPolicy serves p over an in-memory transport and reads the resource.
 func readPolicy(t *testing.T, p *Policy) (policyBody, string) {
 	t.Helper()
+	return readPolicyWith(t, p, []CameraGrant{{ID: "cam-a", ControlAllowed: true}})
+}
+
+func readPolicyWith(t *testing.T, p *Policy, grants []CameraGrant) (policyBody, string) {
+	t.Helper()
 	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
-	RegisterPolicyResource(srv, p, func() []CameraGrant {
-		return []CameraGrant{{ID: "cam-a", ControlAllowed: true}}
-	})
+	RegisterPolicyResource(srv, p, func() []CameraGrant { return grants })
 	st, ct := mcp.NewInMemoryTransports()
 	ctx := context.Background()
 	if _, err := srv.Connect(ctx, st, nil); err != nil {
@@ -141,5 +145,66 @@ func TestLimiterReportsItsConfiguration(t *testing.T) {
 	d := NewLimiter(0, 0)
 	if d.Interval() != DefaultInterval || d.Burst() != DefaultBurst {
 		t.Errorf("defaults: interval=%v burst=%d", d.Interval(), d.Burst())
+	}
+}
+
+func TestPolicyResourceStatesWhyWriteToolsAreGated(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		p, _, _ := newPolicy(on)
+		b, _ := readPolicy(t, p)
+		for _, w := range []string{"physically", "loop", "wear", "opt"} {
+			if !strings.Contains(strings.ToLower(b.Why), w) {
+				t.Errorf("control=%v: why = %q, want it to mention %q", on, b.Why, w)
+			}
+		}
+	}
+}
+
+func TestPolicyResourceSaysPlainlyWhenNoWriteToolExists(t *testing.T) {
+	p, _, _ := newPolicy(false)
+	b, _ := readPolicy(t, p)
+	for name, text := range map[string]string{"explanation": b.Explanation, "how_to_enable": b.HowToEnable} {
+		if !strings.Contains(text, "registers no write tool") {
+			t.Errorf("%s = %q, want it to say this build registers no write tool", name, text)
+		}
+	}
+	if !strings.Contains(b.Explanation, "changes nothing") {
+		t.Errorf("explanation = %q", b.Explanation)
+	}
+
+	p.NoteGated("some.write_tool")
+	b, _ = readPolicy(t, p)
+	for name, text := range map[string]string{"explanation": b.Explanation, "how_to_enable": b.HowToEnable} {
+		if strings.Contains(text, "registers no write tool") || strings.Contains(text, "changes nothing") {
+			t.Errorf("%s = %q must not claim there are no write tools", name, text)
+		}
+	}
+	if !strings.Contains(b.HowToEnable, "enable-control") || !strings.Contains(b.HowToEnable, `"control": true`) {
+		t.Errorf("how_to_enable = %q", b.HowToEnable)
+	}
+}
+
+func TestPolicyResourceCamerasReportWhetherTheyAreWritableNow(t *testing.T) {
+	grants := []CameraGrant{{ID: "cam-a", ControlAllowed: true}, {ID: "cam-b", ControlAllowed: false}}
+	for _, tc := range []struct {
+		control bool
+		want    map[string]bool
+	}{
+		{false, map[string]bool{"cam-a": false, "cam-b": false}},
+		{true, map[string]bool{"cam-a": true, "cam-b": false}},
+	} {
+		p, _, _ := newPolicy(tc.control)
+		b, raw := readPolicyWith(t, p, grants)
+		if !strings.Contains(raw, `"writable"`) {
+			t.Fatalf("no writable field: %s", raw)
+		}
+		for _, c := range b.Cameras {
+			if c.Writable != tc.want[c.ID] {
+				t.Errorf("control=%v %s writable=%v, want %v", tc.control, c.ID, c.Writable, tc.want[c.ID])
+			}
+		}
+		if !strings.Contains(b.Explanation, "control_allowed") || !strings.Contains(b.Explanation, "control_enabled") {
+			t.Errorf("explanation must say control_allowed only matters when control_enabled: %q", b.Explanation)
+		}
 	}
 }

@@ -64,6 +64,10 @@ onvif-mcp -config cameras.json
 | `-enable-control` | Permit state-changing tools (each camera must also opt in). |
 | `-version` | Print the version to stdout and exit without starting the server. |
 
+Write tools are rate limited per camera: one movement per 2 seconds, burst 1. These are
+code defaults (`safety.PolicyOptions`), and v0.1 has no flag or config key to change them;
+`onvif://server/policy` reports the values in force.
+
 The server speaks MCP over stdio: stdout carries only JSON-RPC, and all logging goes to
 stderr. Exit codes: 0 on a clean shutdown (stdin closed, SIGINT or SIGTERM), 1 for a
 configuration or runtime failure (including a config file with loose permissions), 2 for a

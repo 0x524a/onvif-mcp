@@ -508,3 +508,24 @@ func TestAttemptTrackerSeesHandlerReach(t *testing.T) {
 		t.Fatal("reach not recorded")
 	}
 }
+
+func TestFailClosedRefusalsTellTheAgentItIsAServerProblem(t *testing.T) {
+	p, _, _ := newPolicy(true)
+	p.Log = nil
+	d := p.Evaluate("cam-a", tool, false)
+	check := func(name string, d Decision) {
+		t.Helper()
+		if d.Blocked == nil || d.Blocked.Code != mcperr.CodeBlockedByPolicy || d.Blocked.Retryable {
+			t.Fatalf("%s: %+v", name, d.Blocked)
+		}
+		for _, w := range []string{"misconfiguration", "operator", "do not retry"} {
+			if !strings.Contains(d.Blocked.Hint, w) {
+				t.Errorf("%s: hint = %q, want %q", name, d.Blocked.Hint, w)
+			}
+		}
+	}
+	check("no audit log", d)
+	p, _, _ = newPolicy(true)
+	p.Limiter = nil
+	check("no limiter", p.Evaluate("cam-a", tool, false))
+}
