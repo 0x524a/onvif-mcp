@@ -418,11 +418,32 @@ func TestProbeLeaksNoGoroutines(t *testing.T) {
 	}
 	cfg.Cameras["dead"] = &config.Camera{ID: "dead", Endpoint: "http://127.0.0.1:1/x"}
 
-	base := runtime.NumGoroutine()
+	// testcam.Start returns when onvif-go signals ready, which happens before
+	// the server's Serve goroutine is spawned. Taking the baseline earlier
+	// counts one goroutine too few and reports a leak that is not one.
+	base := stableGoroutines(t)
 	r := New(cfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 	_ = r.Probe(ctx)
 	_ = r.Probe(context.Background())
 	settleGoroutines(t, base)
+}
+
+// stableGoroutines polls until the goroutine count has not changed for a
+// quarter of a second, and returns it.
+func stableGoroutines(t *testing.T) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	last, since := runtime.NumGoroutine(), time.Now()
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		if n := runtime.NumGoroutine(); n != last {
+			last, since = n, time.Now()
+		} else if time.Since(since) >= 250*time.Millisecond {
+			return n
+		}
+	}
+	t.Fatalf("goroutine count never stabilised (last %d)", last)
+	return 0
 }
