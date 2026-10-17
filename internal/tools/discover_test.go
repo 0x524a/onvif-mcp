@@ -21,13 +21,16 @@ type fakeDisc struct {
 	err     error
 	timeout time.Duration
 	calls   int
+	// deadline is the backstop deadline of the last call's context.
+	deadline time.Time
 }
 
-func (f *fakeDisc) discover(_ context.Context, d time.Duration) ([]*discovery.Device, error) {
+func (f *fakeDisc) discover(ctx context.Context, d time.Duration) ([]*discovery.Device, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	f.timeout = d
+	f.deadline, _ = ctx.Deadline()
 	return f.devs, f.err
 }
 

@@ -75,6 +75,26 @@ usage error such as an unknown flag or a missing `-config`.
 |------|---------|--------|
 | _filled in as phases land_ | | |
 
+### Output limits and caveats
+
+- Every string in a tool result is stripped of control and formatting characters, scrubbed
+  of registered secrets, and clipped to 256 characters. Non-finite numbers a camera reports
+  are treated as not reported.
+- Lists are capped, and a capped result says so with `truncated: true` and a `total`:
+  `media.profiles` 100, `ptz.presets` 256, `camera.describe` services 64,
+  `camera.discover` candidates 64. A repeated profile or preset token keeps its first
+  entry and is counted in `duplicates_dropped`.
+- `media.stream_uri` removes userinfo, known secret query keys, registered passwords and the
+  fragment. A secret embedded in the URI path cannot be detected and is not removed. A URI
+  over 2048 characters is a `device_fault`.
+- `camera.discover` blocks for its whole probe window (3 s by default, 10 s at most). The
+  underlying library checks for cancellation only between packets, so a cancel or shutdown
+  waits out the rest of the window. A host with no usable network interface fails with
+  `unreachable`. Everything in a candidate is an unauthenticated claim by whatever answered;
+  a device can also reuse a real camera's endpoint reference to overwrite its addresses, which
+  is inherent to WS-Discovery. Candidates on a directly attached network are preferred when the
+  list is capped.
+
 ## Scope / what this does not do
 
 onvif-mcp deliberately exposes a small surface. It does **not**:
