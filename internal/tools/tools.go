@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	onvif "github.com/0x524a/onvif-go"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -65,6 +66,37 @@ func ReadOnly(title string) *mcp.ToolAnnotations {
 // from dumping the whole JSON into the text as well.
 func text(s string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: clip(redact.Scrub(s))}}}
+}
+
+// joinWithin joins parts with sep, keeping as many whole parts as fit in budget
+// bytes. When parts are left out it ends with "(+N more; see structured
+// result)" instead of a bare cut, so ids are never silently half-dropped. total
+// is the number of items the caller's count covers, which can exceed len(parts)
+// when the structured list itself was capped.
+func joinWithin(parts []string, sep string, budget, total int) string {
+	var b strings.Builder
+	shown := 0
+	for _, p := range parts {
+		add := len(p)
+		if shown > 0 {
+			add += len(sep)
+		}
+		if b.Len()+add > budget {
+			break
+		}
+		if shown > 0 {
+			b.WriteString(sep)
+		}
+		b.WriteString(p)
+		shown++
+	}
+	if more := total - shown; more > 0 {
+		if shown > 0 {
+			b.WriteString(sep)
+		}
+		fmt.Fprintf(&b, "(+%d more; see structured result)", more)
+	}
+	return b.String()
 }
 
 func clip(s string) string {

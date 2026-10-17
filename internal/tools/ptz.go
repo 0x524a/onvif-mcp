@@ -111,8 +111,18 @@ type PresetSummary struct {
 // PresetsData is the ptz.presets result.
 type PresetsData struct {
 	Presets []PresetSummary `json:"presets"`
-	Limits  *Limits         `json:"reported_limits,omitempty"`
+	// Total is the number of distinct preset tokens the camera reported.
+	Total int `json:"total"`
+	// Truncated is true when Total exceeds the number listed.
+	Truncated bool `json:"truncated"`
+	// DuplicatesDropped counts presets dropped for repeating an earlier token;
+	// the first is kept.
+	DuplicatesDropped int     `json:"duplicates_dropped,omitempty"`
+	Limits            *Limits `json:"reported_limits,omitempty"`
 }
+
+// maxPresets bounds ptz.presets; ONVIF cameras commonly hold up to 255.
+const maxPresets = 256
 
 // StatusData is the ptz.status result. Absent position fields were not
 // reported by the camera.
@@ -178,10 +188,22 @@ func RegisterPTZReads(srv *mcp.Server, d Deps) {
 		if err != nil {
 			return fail[PresetsData](withHint(mcperr.FromError(err, in.Camera, "GetPresets"), profilesHint))
 		}
-		out := PresetsData{Presets: make([]PresetSummary, 0, len(presets))}
+		out := PresetsData{Presets: make([]PresetSummary, 0, min(len(presets), maxPresets))}
 		noPos := 0
+		seen := map[string]bool{}
 		for _, p := range presets {
 			if p == nil {
+				continue
+			}
+			tok := cleanString(p.Token, maxFieldRunes)
+			if seen[tok] {
+				out.DuplicatesDropped++
+				continue
+			}
+			seen[tok] = true
+			out.Total++
+			if len(out.Presets) >= maxPresets {
+				out.Truncated = true
 				continue
 			}
 			s := PresetSummary{Token: clip(redact.Scrub(p.Token)), Name: clip(redact.Scrub(p.Name))}
@@ -201,7 +223,10 @@ func RegisterPTZReads(srv *mcp.Server, d Deps) {
 				}
 			}
 		}
-		msg := fmt.Sprintf("%d preset(s)", len(out.Presets))
+		msg := fmt.Sprintf("%d preset(s)", out.Total)
+		if out.Truncated {
+			msg += fmt.Sprintf(" (first %d listed)", len(out.Presets))
+		}
 		if noPos > 0 {
 			msg += fmt.Sprintf(", %d with position not reported", noPos)
 		}

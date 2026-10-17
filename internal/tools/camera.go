@@ -26,6 +26,7 @@ const (
 	maxCandidates = 64
 	maxXAddrs     = 4
 	maxScopes     = 16
+	maxServices   = 64
 	maxFieldChars = 256
 )
 
@@ -33,14 +34,18 @@ const (
 // names say "advertised" because ONVIF service lists are claims: a camera may
 // list a service it does not implement.
 type DescribeData struct {
-	Manufacturer         string   `json:"manufacturer,omitempty"`
-	Model                string   `json:"model,omitempty"`
-	FirmwareVersion      string   `json:"firmware_version,omitempty"`
-	SerialNumber         string   `json:"serial_number,omitempty"`
-	HardwareID           string   `json:"hardware_id,omitempty"`
-	AdvertisedServices   []string `json:"advertised_services"`
-	CapabilitiesVerified bool     `json:"capabilities_verified"`
-	CapabilitiesNote     string   `json:"capabilities_note"`
+	Manufacturer       string   `json:"manufacturer,omitempty"`
+	Model              string   `json:"model,omitempty"`
+	FirmwareVersion    string   `json:"firmware_version,omitempty"`
+	SerialNumber       string   `json:"serial_number,omitempty"`
+	HardwareID         string   `json:"hardware_id,omitempty"`
+	AdvertisedServices []string `json:"advertised_services"`
+	// Total is the number of distinct services advertised; Truncated is true
+	// when more than AdvertisedServices lists.
+	Total                int    `json:"total"`
+	Truncated            bool   `json:"truncated"`
+	CapabilitiesVerified bool   `json:"capabilities_verified"`
+	CapabilitiesNote     string `json:"capabilities_note"`
 }
 
 // Discoverer performs a WS-Discovery probe lasting at most timeout.
@@ -218,13 +223,18 @@ func RegisterCamera(srv *mcp.Server, d Deps) {
 				}
 			}
 			sort.Strings(out.AdvertisedServices)
+			out.Total = len(out.AdvertisedServices)
+			if out.Total > maxServices {
+				out.AdvertisedServices = out.AdvertisedServices[:maxServices]
+				out.Truncated = true
+			}
 		}
 		msg := strings.TrimSpace(fmt.Sprintf("%s %s.", out.Manufacturer, out.Model))
 		if out.Manufacturer == "" && out.Model == "" {
 			msg = "Identity not reported."
 		}
 		if listed {
-			msg += fmt.Sprintf(" %d advertised service(s), not verified.", len(out.AdvertisedServices))
+			msg += fmt.Sprintf(" %d advertised service(s), not verified.", out.Total)
 		} else {
 			out.CapabilitiesNote = "the camera did not report a service list; " + out.CapabilitiesNote
 			msg += " Service list not reported."
