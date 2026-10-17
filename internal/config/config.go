@@ -50,6 +50,12 @@ type Camera struct {
 	// Control opts this camera in to write tools. Defaults false. The
 	// process-level flag is a separate, additional gate.
 	Control bool `json:"control,omitempty"`
+	// TrustAdvertisedHosts lets the camera's advertised service addresses
+	// (media, PTZ, imaging) point at a host other than the configured
+	// endpoint's. Defaults false: such a request is refused, because a hostile
+	// camera could otherwise aim the server, and the WS-Security header it
+	// sends, at any host. Set it for NATed or multi-homed cameras.
+	TrustAdvertisedHosts bool `json:"trust_advertised_hosts,omitempty"`
 }
 
 // Timeout returns the configured per-camera timeout, defaulting to 10s.

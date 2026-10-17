@@ -18,6 +18,14 @@ import (
 	"github.com/0x524a/onvif-mcp/internal/redact"
 )
 
+// ErrResponseTooLarge is returned (wrapped) by the registry transport when a
+// camera's reply exceeds the size bound.
+var ErrResponseTooLarge = errors.New("camera response too large")
+
+// ErrForeignHost is returned (wrapped) by the registry transport when a request
+// would go to a host other than the configured endpoint's.
+var ErrForeignHost = errors.New("camera advertised a service address on another host")
+
 // classifier is reused rather than reimplemented: rtspeek exports its taxonomy
 // but never applies it to the errors DescribeStream returns.
 var classifier = rtspeek.NewErrorClassifier()
@@ -236,6 +244,17 @@ func fromError(err error, camera, operation string) *ToolError {
 	}
 
 	switch {
+	case errors.Is(err, ErrResponseTooLarge):
+		// Fixed text: the wrapped chain quotes the request URL.
+		te.Message = ErrResponseTooLarge.Error()
+		te.Code = CodeDeviceFault
+		te.Hint = "the camera sent a reply larger than onvif-mcp accepts; it is misbehaving or hostile"
+	case errors.Is(err, ErrForeignHost):
+		// Fixed text: the wrapped chain quotes the advertised URL, which can
+		// carry a query secret.
+		te.Message = ErrForeignHost.Error()
+		te.Code = CodeDeviceFault
+		te.Hint = "the request was refused; if this camera is NATed or multi-homed, the operator can set trust_advertised_hosts for it in the config"
 	case errors.Is(err, onvif.ErrTimeout), errors.Is(err, context.DeadlineExceeded):
 		te.Code = CodeTimeout
 		te.Hint = "the camera did not answer in time; retry, or raise its configured timeout"

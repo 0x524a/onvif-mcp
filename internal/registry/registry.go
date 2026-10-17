@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -327,6 +329,102 @@ func newTransport() *http.Transport {
 	return &http.Transport{DisableKeepAlives: true}
 }
 
+// MaxResponseBytes bounds one camera reply body. onvif-go reads replies with
+// io.ReadAll, so without a bound a hostile or broken camera could exhaust
+// memory. A var so tests can lower it.
+var MaxResponseBytes int64 = 8 << 20
+
+// guardTransport enforces two policies on everything a camera makes the
+// server do:
+//
+//   - A request to a host other than the configured endpoint's is refused
+//     unless trust is set. Service addresses (media, PTZ, imaging) come from
+//     the camera's GetCapabilities reply; followed blindly, a hostile camera
+//     could aim the server, and the WS-Security header it sends, anywhere. A
+//     different port on the same host is allowed. onvif-go itself already
+//     rewrites loopback addresses to the configured host.
+//   - A reply body larger than MaxResponseBytes fails with
+//     mcperr.ErrResponseTooLarge.
+type guardTransport struct {
+	base  http.RoundTripper
+	host  string
+	trust bool
+}
+
+func (g guardTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !g.trust && !sameHost(req.URL.Hostname(), g.host) {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, mcperr.ErrForeignHost
+	}
+	resp, err := g.base.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	limit := MaxResponseBytes
+	if resp.ContentLength > limit {
+		_ = resp.Body.Close()
+		return nil, mcperr.ErrResponseTooLarge
+	}
+	resp.Body = &limitedBody{rc: resp.Body, left: limit}
+	return resp, nil
+}
+
+// limitedBody fails, rather than truncates, once more than the limit is read:
+// a silently cut SOAP envelope would be misreported as a malformed reply.
+type limitedBody struct {
+	rc   io.ReadCloser
+	left int64
+}
+
+func (b *limitedBody) Read(p []byte) (int, error) {
+	if b.left < 0 {
+		return 0, mcperr.ErrResponseTooLarge
+	}
+	if int64(len(p)) > b.left+1 {
+		p = p[:b.left+1]
+	}
+	n, err := b.rc.Read(p)
+	b.left -= int64(n)
+	if b.left < 0 {
+		return 0, mcperr.ErrResponseTooLarge
+	}
+	return n, err
+}
+
+func (b *limitedBody) Close() error { return b.rc.Close() }
+
+// sameHost compares two host names, case-insensitively and, for IP literals,
+// by address so that textual variants of one address match.
+func sameHost(a, b string) bool {
+	a, b = strings.TrimSuffix(strings.ToLower(a), "."), strings.TrimSuffix(strings.ToLower(b), ".")
+	if a == "" || b == "" {
+		return false
+	}
+	if ia, ib := net.ParseIP(a), net.ParseIP(b); ia != nil && ib != nil {
+		return ia.Equal(ib)
+	}
+	return a == b
+}
+
+// endpointHost returns the host (no port, no brackets) of a configured
+// endpoint, which may omit the scheme.
+func endpointHost(endpoint string) string {
+	rest := strings.TrimSpace(endpoint)
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	u, err := url.Parse("http://" + rest)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+}
+
 // Client returns a new client that has completed Initialize. The caller owns
 // it and it is never shared, which is what keeps onvif-go issue #60 out of
 // reach. This is the only place a client is obtained; the later events work
@@ -351,7 +449,7 @@ func (e Entry) Client(ctx context.Context) (*onvif.Client, error) {
 	// A private transport with keep-alives off: no idle connection can outlive
 	// the call, and onvif-go v1.2.0 has no Close to release one.
 	hc := &http.Client{
-		Transport: newTransport(),
+		Transport: guardTransport{base: newTransport(), host: endpointHost(cam.Endpoint), trust: cam.TrustAdvertisedHosts},
 		// Match onvif-go's default: never follow redirects, so http is not
 		// silently upgraded or credentials replayed elsewhere.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },

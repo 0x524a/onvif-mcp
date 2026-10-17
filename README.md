@@ -35,6 +35,23 @@ The server refuses to start if the config file is readable by group or other, be
 holds credentials. Git does not preserve the owner-only mode, so a fresh clone or copy
 needs the `chmod` above.
 
+### Advertised service addresses and `trust_advertised_hosts`
+
+A camera tells the server where its media, PTZ and imaging services live, and the server
+sends authenticated requests there. A hostile or misconfigured camera could use that to
+aim requests at an unrelated host. By default onvif-mcp therefore refuses any request whose
+host differs from the host in the camera's configured `endpoint` (a different port on the
+same host is fine, and loopback addresses are already rewritten to the configured host by
+the client library). The tool then fails with `device_fault`: "camera advertised a service
+address on another host".
+
+For a camera behind NAT or with several addresses, set `"trust_advertised_hosts": true` on
+that camera to turn the check off for it. The default is `false`. Hosts are compared as
+written, so a camera configured by name that advertises its IP address needs the flag too.
+
+A reply body over 8 MiB is rejected with `device_fault` ("camera response too large")
+instead of being read into memory.
+
 ## Run
 
 ```bash
