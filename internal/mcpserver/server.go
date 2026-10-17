@@ -10,6 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/0x524a/onvif-mcp/internal/mcperr"
+	"github.com/0x524a/onvif-mcp/internal/redact"
 	"github.com/0x524a/onvif-mcp/internal/registry"
 )
 
@@ -54,19 +55,91 @@ func summarize(cams []registry.Status) string {
 		len(cams), strings.Join(parts, ", "))
 }
 
+// Option configures New.
+type Option func(*options)
+
+type options struct{ base context.Context }
+
+// WithBaseContext makes every tool call also stop when base is done. The SDK
+// derives handler contexts from the request, not from the Run context, so
+// without this a SIGTERM during a slow camera probe waits out the probe.
+func WithBaseContext(base context.Context) Option {
+	return func(o *options) { o.base = base }
+}
+
+// withBase returns a context cancelled when either ctx or base is done.
+func withBase(ctx, base context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	if base == nil {
+		return ctx, cancel
+	}
+	stop := context.AfterFunc(base, cancel)
+	return ctx, func() { stop(); cancel() }
+}
+
+const argHint = "Pass a JSON object containing only the fields declared in the tool's inputSchema, with the declared types."
+
+// maxArgErrChars bounds the validation message; the SDK text can echo the
+// offending value.
+const maxArgErrChars = 300
+
+// argumentErrors is receiving middleware. go-sdk v1.7.0 (mcp/server.go,
+// toolForErr) answers schema-validation failures with a plain-text error
+// result that never reaches the handler; this rewrites exactly those results
+// into the Out error envelope so an agent sees one error shape everywhere.
+func argumentErrors(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		res, err := next(ctx, method, req)
+		if err != nil || method != "tools/call" {
+			return res, err
+		}
+		ctr, ok := res.(*mcp.CallToolResult)
+		if !ok || ctr == nil || !ctr.IsError || ctr.StructuredContent != nil || len(ctr.Content) == 0 {
+			return res, err
+		}
+		tc, ok := ctr.Content[0].(*mcp.TextContent)
+		if !ok || !strings.HasPrefix(tc.Text, `validating "arguments"`) {
+			return res, err
+		}
+		msg := redact.Scrub(tc.Text)
+		if len(msg) > maxArgErrChars {
+			msg = msg[:maxArgErrChars] + "..."
+		}
+		ctr.Content = []mcp.Content{&mcp.TextContent{Text: msg}}
+		ctr.StructuredContent = mcperr.Fail[any](&mcperr.ToolError{
+			Code:      mcperr.CodeInvalidArgument,
+			Retryable: false,
+			Message:   msg,
+			Hint:      argHint,
+		})
+		return ctr, nil
+	}
+}
+
 // New builds the server and registers the tool surface.
-func New(reg *registry.Registry, log *slog.Logger) *mcp.Server {
+func New(reg *registry.Registry, log *slog.Logger, opts ...Option) *mcp.Server {
+	var o options
+	for _, f := range opts {
+		f(&o)
+	}
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    "onvif-mcp",
 		Version: version,
 	}, nil)
+	srv.AddReceivingMiddleware(argumentErrors)
 
 	// Always the generic free function mcp.AddTool, never the srv.AddTool
 	// method: the method skips input validation and turns handler errors into
 	// protocol errors instead of tool errors (go-sdk v1.7.0 server.go).
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "camera.list",
-		Description: "List configured cameras and whether control is allowed. Set probe to contact each camera and report whether it is reachable.",
+		Name: "camera.list",
+		Description: "List the cameras this server is configured with. Each entry has: id (the handle to use for " +
+			"other tools); endpoint (the camera's URL, credentials never included); control_allowed (whether " +
+			"state-changing tools may act on it). With probe=true each camera is also contacted and gets state " +
+			"(reachable or unreachable) and, when unreachable, error and error_code. Without probe nothing is " +
+			"contacted and state, error and error_code are absent. A dead camera never fails the call: it is " +
+			"reported in its own entry. probe has a built-in time budget, so a hung camera cannot stall it. " +
+			"The result is under data.cameras; error is set only if the call itself failed.",
 		Annotations: &mcp.ToolAnnotations{
 			Title:           "List cameras",
 			ReadOnlyHint:    true,
@@ -81,12 +154,19 @@ func New(reg *registry.Registry, log *slog.Logger) *mcp.Server {
 			OpenWorldHint: boolPtr(false),
 		},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ListIn) (*mcp.CallToolResult, mcperr.Out[ListData], error) {
+		ctx, cancel := withBase(ctx, o.base)
+		defer cancel()
 		var cams []registry.Status
 		if in.Probe {
 			// Probe has its own overall budget (15s default) and a bound of 8
 			// cameras in flight, so the handler needs no extra timeout. A
 			// dead camera is reported in its Status, never as a call failure.
 			cams = reg.Probe(ctx)
+			// Cancelled (client cancel or shutdown): the per-camera entries
+			// say "not probed", so do not present them as a listing.
+			if err := ctx.Err(); err != nil {
+				return nil, mcperr.Out[ListData]{}, fmt.Errorf("camera.list cancelled: %w", err)
+			}
 		} else {
 			cams = reg.List()
 		}

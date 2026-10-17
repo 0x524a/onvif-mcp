@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -108,14 +110,23 @@ func TestReadToolsCarryAllFourAnnotations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(res.Tools) == 0 {
+		t.Fatal("tools/list returned no tools; the annotation checks below would pass vacuously")
+	}
 	for _, tool := range res.Tools {
 		a := tool.Annotations
 		if a == nil {
 			t.Errorf("%s has no annotations", tool.Name)
 			continue
 		}
+		if a.Title == "" {
+			t.Errorf("%s: Title must be set", tool.Name)
+		}
 		if !a.ReadOnlyHint {
-			continue // write tools are covered in Phase 8
+			continue // write-tool annotation rules are asserted in Phase 8
+		}
+		if !a.IdempotentHint {
+			t.Errorf("%s: a read-only tool must be marked idempotent", tool.Name)
 		}
 		if a.DestructiveHint == nil {
 			t.Errorf("%s: DestructiveHint must be set explicitly, not left nil", tool.Name)
@@ -177,6 +188,10 @@ func TestCameraListReturnsStructuredAndTextContent(t *testing.T) {
 	}
 }
 
+// Guards the generic mcp.AddTool property: arguments are validated against
+// the input schema and a failure comes back as a tool error (IsError), not a
+// protocol error. A tool registered with the srv.AddTool method would skip
+// validation entirely and make this test fail.
 func TestCameraListRejectsBadInput(t *testing.T) {
 	srv, _ := newTestServer(t, false)
 	cs := connect(t, srv)
@@ -200,6 +215,84 @@ func TestCameraListRejectsBadInput(t *testing.T) {
 				t.Fatalf("error content is not readable text: %#v", res.Content[0])
 			}
 		})
+	}
+}
+
+func TestDefaultCallDoesNotProbe(t *testing.T) {
+	srv, _ := newTestServer(t, true)
+	cams := decodeCameras(t, callList(t, connect(t, srv), map[string]any{}))
+	if len(cams) != 2 {
+		t.Fatalf("want 2 cameras, got %d", len(cams))
+	}
+	for _, c := range cams {
+		if c.State != "" || c.ErrorCode != "" || c.Error != "" {
+			t.Errorf("%s: probe=false must not contact the camera, got %+v", c.ID, c)
+		}
+	}
+}
+
+func decodeCameras(t *testing.T, res *mcp.CallToolResult) []registry.Status {
+	t.Helper()
+	b, _ := json.Marshal(res.StructuredContent)
+	var out struct {
+		Data struct {
+			Cameras []registry.Status `json:"cameras"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return out.Data.Cameras
+}
+
+func TestSummarize(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []registry.Status
+		want string
+	}{
+		{"empty", nil, "No cameras are configured."},
+		{"not probed", []registry.Status{{ID: "a", Endpoint: "http://h/x"}},
+			"1 camera(s): a. Full detail is in the structured result."},
+		{"reachable", []registry.Status{{ID: "a", State: "reachable"}},
+			"1 camera(s): a (reachable). Full detail is in the structured result."},
+		{"unreachable with code", []registry.Status{
+			{ID: "a", State: "reachable"},
+			{ID: "b", State: "unreachable", ErrorCode: "timeout", Error: "Post http://h: slow", Endpoint: "http://h/x"}},
+			"2 camera(s): a (reachable), b (unreachable: timeout). Full detail is in the structured result."},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := summarize(c.in)
+			if got != c.want {
+				t.Errorf("summarize = %q, want %q", got, c.want)
+			}
+			if strings.Contains(got, "http") || strings.ContainsAny(got, "{[") {
+				t.Errorf("summary must carry no endpoint text or JSON: %q", got)
+			}
+		})
+	}
+}
+
+func TestEmptyConfigListsNothing(t *testing.T) {
+	srv := New(registry.New(&config.Config{}), quietLog())
+	res := callList(t, connect(t, srv), map[string]any{"probe": true})
+	if res.IsError {
+		t.Fatalf("empty config must not be an error: %+v", res.Content)
+	}
+	tc := res.Content[0].(*mcp.TextContent)
+	if tc.Text != "No cameras are configured." {
+		t.Errorf("text = %q", tc.Text)
+	}
+}
+
+func TestDescriptionExplainsFields(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	d := findTool(t, connect(t, srv), "camera.list").Description
+	for _, want := range []string{"id", "endpoint", "credentials", "control_allowed", "state", "error_code", "probe", "never fails", "time budget"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("description lacks %q: %s", want, d)
+		}
 	}
 }
 
@@ -285,5 +378,147 @@ func TestResultsContainNoPassword(t *testing.T) {
 func TestVersion(t *testing.T) {
 	if Version() == "" {
 		t.Error("empty version")
+	}
+}
+
+// hangListener accepts connections and never answers, like a wedged camera.
+func hangListener(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conns []net.Conn
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			conns = append(conns, c)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = l.Close()
+		<-done
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	return "http://" + l.Addr().String() + "/onvif/device_service"
+}
+
+func hungServer(t *testing.T, opts ...Option) *mcp.Server {
+	t.Helper()
+	cfg := &config.Config{Cameras: map[string]*config.Camera{
+		"hung": {ID: "hung", Endpoint: hangListener(t), Username: "u", Password: "p", TimeoutSeconds: 60},
+	}}
+	return New(registry.New(cfg), quietLog(), opts...)
+}
+
+func TestBaseContextCancelAbortsInFlightProbe(t *testing.T) {
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := connect(t, hungServer(t, WithBaseContext(base)))
+	type result struct {
+		res *mcp.CallToolResult
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		res, err := cs.CallTool(context.Background(),
+			&mcp.CallToolParams{Name: "camera.list", Arguments: map[string]any{"probe": true}})
+		ch <- result{res, err}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	start := time.Now()
+	cancel()
+	select {
+	case r := <-ch:
+		if d := time.Since(start); d > 3*time.Second {
+			t.Errorf("handler took %v to stop after shutdown", d)
+		}
+		if r.err == nil && !r.res.IsError {
+			t.Errorf("a cancelled probe must not be a successful listing: %+v", r.res.StructuredContent)
+		}
+		if r.res != nil {
+			b, _ := json.Marshal(r.res)
+			for _, bad := range []string{"unreachable", "internal"} {
+				if strings.Contains(string(b), bad) {
+					t.Errorf("cancelled probe reported as %q: %s", bad, b)
+				}
+			}
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight probe ignored the base context cancellation")
+	}
+}
+
+// The agent-legible envelope for schema-validation failures. Checked against
+// go-sdk v1.7.0, where these never reach the handler.
+func TestArgumentErrorsUseTheEnvelope(t *testing.T) {
+	srv, cam := newTestServer(t, false)
+	cs := connect(t, srv)
+	cases := []struct {
+		name  string
+		args  any
+		field string
+	}{
+		{"unknown field", map[string]any{"bogus": 1}, "bogus"},
+		{"wrong type", map[string]any{"probe": "yes"}, "probe"},
+		{"not an object", []any{1, 2}, "arguments"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := callList(t, cs, c.args)
+			if !res.IsError {
+				t.Fatal("want IsError")
+			}
+			b, _ := json.Marshal(res.StructuredContent)
+			var out struct {
+				Data  any `json:"data"`
+				Error *struct {
+					Code      string `json:"code"`
+					Retryable *bool  `json:"retryable"`
+					Message   string `json:"message"`
+					Hint      string `json:"hint"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(b, &out); err != nil || out.Error == nil {
+				t.Fatalf("no error envelope in structuredContent: %s", b)
+			}
+			if out.Data != nil {
+				t.Errorf("error envelope must not carry data: %s", b)
+			}
+			e := out.Error
+			if e.Code != "invalid_argument" || e.Retryable == nil || *e.Retryable {
+				t.Errorf("code/retryable = %q/%v", e.Code, e.Retryable)
+			}
+			if !strings.Contains(e.Message, c.field) {
+				t.Errorf("message does not name %q: %q", c.field, e.Message)
+			}
+			if e.Hint == "" {
+				t.Error("no hint")
+			}
+			tc, ok := res.Content[0].(*mcp.TextContent)
+			if !ok || !strings.Contains(tc.Text, c.field) {
+				t.Errorf("text content should carry the message: %#v", res.Content[0])
+			}
+			if strings.Contains(string(b), cam.Password()) {
+				t.Error("password in error envelope")
+			}
+		})
+	}
+}
+
+func TestArgumentErrorMessageIsScrubbed(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	res := callList(t, connect(t, srv),
+		map[string]any{"probe": "http://admin:Hunter2Pass@10.0.0.1/x"}) //nolint:gosec // fake credential for a leak test
+	b, _ := json.Marshal(res)
+	if !res.IsError || strings.Contains(string(b), "Hunter2Pass") {
+		t.Errorf("echoed value must be scrubbed: %s", b)
 	}
 }
