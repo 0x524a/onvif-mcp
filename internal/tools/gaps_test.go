@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"strings"
 	"testing"
@@ -277,5 +278,30 @@ func TestPresetsTextWhenCappedAndWhenAllHavePositions(t *testing.T) {
 	}
 	if strings.Contains(txt, "with position not reported") {
 		t.Errorf("every preset has a position, the text must not say otherwise: %q", txt)
+	}
+}
+
+// snippet encodes the endpoint itself, whatever the caller already did to it.
+func TestSnippetIsAlwaysOneJSONField(t *testing.T) {
+	for _, endpoint := range []string{`http://h/a"b","password":"x`, "http://h/\\\"", "http://h/s"} {
+		s := snippet(endpoint)
+		var m map[string]map[string]string
+		if err := json.Unmarshal([]byte("{"+s+"}"), &m); err != nil {
+			t.Errorf("snippet(%q) is not a JSON member: %v: %s", endpoint, err, s)
+			continue
+		}
+		if got := m["<choose-an-id>"]["endpoint"]; got != endpoint || len(m["<choose-an-id>"]) != 1 {
+			t.Errorf("snippet(%q) = %v", endpoint, m)
+		}
+	}
+}
+
+func TestHostRankOfAnUnparseableAddressIsSpecial(t *testing.T) {
+	pinOffLink(t)
+	if got := hostRank("http://[::1"); got != rankSpecial {
+		t.Errorf("hostRank = %d, want rankSpecial", got)
+	}
+	if got := hostRank("http://10.0.0.1/s"); got != rankOther {
+		t.Errorf("hostRank = %d, want rankOther", got)
 	}
 }
