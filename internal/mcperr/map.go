@@ -2,7 +2,13 @@ package mcperr
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"io"
+	"net"
+	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -23,7 +29,140 @@ func isAuthSignal(s string) bool {
 	return strings.Contains(l, "notauthorized") ||
 		strings.Contains(l, "not authorized") ||
 		strings.Contains(l, "unauthorized") ||
+		strings.Contains(l, "authentication failed") ||
 		strings.Contains(l, "401")
+}
+
+// isAuthText is the stricter form used on onvif-go error text, where a bare
+// "401" would also match a port or an address. HTTP 401 and 403 are handled
+// separately through the parsed status.
+func isAuthText(s string) bool {
+	l := strings.ToLower(s)
+	return strings.Contains(l, "notauthorized") ||
+		strings.Contains(l, "not authorized") ||
+		strings.Contains(l, "unauthorized") ||
+		strings.Contains(l, "authentication failed")
+}
+
+var (
+	// httpFailedRe matches onvif-go's "HTTP request failed with status N:"
+	// error prefix (internal/soap/soap.go), after which it appends the raw
+	// response body when that body is not a parseable SOAP fault.
+	httpFailedRe = regexp.MustCompile(`HTTP request failed with status \d{3}:`)
+	statusRe     = regexp.MustCompile(`(?i)\bstatus(?: code)?[: ]+(\d{3})\b`)
+)
+
+// cutBody drops everything from the first '<' after an "HTTP request failed
+// with status N:" prefix. A device may echo the request, WS-Security header
+// included, in an error body; no raw XML body ever reaches an agent.
+func cutBody(s string) string {
+	loc := httpFailedRe.FindStringIndex(s)
+	if loc == nil {
+		return s
+	}
+	i := strings.IndexByte(s[loc[1]:], '<')
+	if i < 0 {
+		return s
+	}
+	return strings.TrimRight(s[:loc[1]+i], " ") + " [response body omitted]"
+}
+
+// httpStatus returns the HTTP status named in err's text, or 0.
+func httpStatus(s string) int {
+	if m := statusRe.FindStringSubmatch(s); m != nil {
+		n, _ := strconv.Atoi(m[1])
+		return n
+	}
+	return 0
+}
+
+const (
+	hintCredentials = "verify the username and password configured for this camera"
+	hintEndpoint404 = "the configured endpoint path returned HTTP 404; check this camera's endpoint in the config (the path after host:port, usually /onvif/device_service)"
+	hintRedirect    = "the camera redirected the request and onvif-mcp does not follow redirects; set the camera's endpoint to the redirect target, often the https:// form"
+	hintGateway     = "the camera or a gateway in front of it is temporarily unavailable; retry shortly"
+	hintTLS         = "endpoint scheme or certificate mismatch; check http vs https in the configured endpoint and the camera's certificate"
+	hintGarbage     = "the endpoint answered with something that is not an ONVIF SOAP response; check the configured port and scheme"
+	hintCancelled   = "the call was cancelled before the camera answered"
+)
+
+// verdict is a code and hint chosen from transport or HTTP evidence.
+type verdict struct {
+	code Code
+	hint string
+}
+
+func isTLSTyped(err error) bool {
+	var rh tls.RecordHeaderError
+	var cv *tls.CertificateVerificationError
+	var ua x509.UnknownAuthorityError
+	var he x509.HostnameError
+	var ci x509.CertificateInvalidError
+	return errors.As(err, &rh) || errors.As(err, &cv) || errors.As(err, &ua) ||
+		errors.As(err, &he) || errors.As(err, &ci)
+}
+
+// classifyTransport classifies failures onvif-go v1.2.0 returns as plain
+// wrapped errors with no sentinel: transport errors, TLS errors and HTTP
+// statuses. Taxonomy choices (spec section 9 has nine closed codes):
+//
+//   - TLS / scheme / certificate mismatch is invalid_argument: only an
+//     operator fixing the configured endpoint or trusting the certificate
+//     helps, so it must not be retryable (unreachable is).
+//   - A reply that is not HTTP or not SOAP is device_fault: the host answered,
+//     but not as an ONVIF device.
+//   - 502/503/504 are unreachable (retryable); 404 and redirects point at the
+//     configured endpoint, so invalid_argument.
+//
+// The HTTP status is read before any text heuristic so that a body such as
+// "404 page not found" is never taken for a missing token.
+func classifyTransport(err error) (verdict, bool) {
+	text := err.Error()
+	l := strings.ToLower(text)
+
+	if isTLSTyped(err) {
+		return verdict{CodeInvalidArgument, hintTLS}, true
+	}
+	switch httpStatus(text) {
+	case 401, 403:
+		return verdict{CodeAuthFailed, hintCredentials}, true
+	case 404:
+		return verdict{CodeInvalidArgument, hintEndpoint404}, true
+	case 301, 302, 307, 308:
+		return verdict{CodeInvalidArgument, hintRedirect}, true
+	case 502, 503, 504:
+		return verdict{CodeUnreachable, hintGateway}, true
+	}
+	if strings.Contains(l, "server gave http response to https client") || strings.Contains(l, "x509:") || strings.Contains(l, "tls:") || (strings.Contains(l, "tls handshake") && !strings.Contains(l, "timeout")) {
+		return verdict{CodeInvalidArgument, hintTLS}, true
+	}
+	if strings.Contains(l, "malformed http") || strings.Contains(l, "readlooppeekfaillocked") || strings.Contains(l, "unmarshal soap envelope") {
+		return verdict{CodeDeviceFault, hintGarbage}, true
+	}
+	var ne net.Error
+	if (errors.As(err, &ne) && ne.Timeout()) || strings.Contains(l, "i/o timeout") ||
+		strings.Contains(l, "timed out") || strings.Contains(l, "tls handshake timeout") {
+		return verdict{CodeTimeout, "the camera did not answer in time; retry, or raise its configured timeout"}, true
+	}
+	var oe *net.OpError
+	var de *net.DNSError
+	unreachable := verdict{CodeUnreachable, "check power, network reachability, and the configured endpoint"}
+	if errors.As(err, &oe) || errors.As(err, &de) {
+		return unreachable, true
+	}
+	if isAuthText(text) {
+		return verdict{CodeAuthFailed, hintCredentials}, true
+	}
+	for _, k := range []string{"connection refused", "no route to host", "network is unreachable",
+		"no such host", "connection reset", "broken pipe", "closed idle connection", "connection closed"} {
+		if strings.Contains(l, k) {
+			return unreachable, true
+		}
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || strings.HasSuffix(l, "eof") {
+		return verdict{CodeUnreachable, "the connection closed before the camera answered; check power, the configured port and scheme"}, true
+	}
+	return verdict{}, false
 }
 
 // FromError maps an onvif-go error onto the taxonomy.
@@ -79,7 +218,7 @@ func fromError(err error, camera, operation string) *ToolError {
 	te := &ToolError{
 		Camera:    camera,
 		Operation: operation,
-		Message:   redact.Scrub(err.Error()),
+		Message:   redact.Scrub(cutBody(err.Error())),
 	}
 
 	var oe *onvif.ONVIFError
@@ -100,6 +239,9 @@ func fromError(err error, camera, operation string) *ToolError {
 	case errors.Is(err, onvif.ErrTimeout), errors.Is(err, context.DeadlineExceeded):
 		te.Code = CodeTimeout
 		te.Hint = "the camera did not answer in time; retry, or raise its configured timeout"
+	case errors.Is(err, context.Canceled):
+		te.Code = CodeInternal
+		te.Hint = hintCancelled
 	case errors.Is(err, onvif.ErrConnectionFailed):
 		te.Code = CodeUnreachable
 		te.Hint = "check power, network reachability, and the configured endpoint"
@@ -121,12 +263,16 @@ func fromError(err error, camera, operation string) *ToolError {
 		errors.Is(err, onvif.ErrInvalidEndpoint),
 		errors.Is(err, onvif.ErrInvalidEndpointFormat):
 		te.Code = CodeInvalidArgument
-	case isNotFoundText(err.Error()):
-		// onvif-go surfaces some SOAP faults, such as an unknown preset token, as a
-		// plain wrapped HTTP 500 error with no sentinel. Classify on the text.
-		te.Code = CodeNotFound
-		te.Hint = "list the available tokens first, then pass one of them"
 	default:
+		if v, ok := classifyTransport(err); ok {
+			te.Code, te.Hint = v.code, v.hint
+			break
+		}
+		if isNotFoundText(err.Error()) {
+			te.Code = CodeNotFound
+			te.Hint = "list the available tokens first, then pass one of them"
+			break
+		}
 		te.Code = CodeInternal
 	}
 	te.Retryable = te.Code.Retryable()
