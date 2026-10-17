@@ -1,14 +1,14 @@
 package safety
 
 import (
-	"strings"
-
 	"github.com/0x524a/onvif-mcp/internal/redact"
 )
 
 const (
 	maxAuditCamera  = 64
 	maxAuditOutcome = 120
+	// maxErrCamera bounds the camera id echoed back in a refusal.
+	maxErrCamera = 256
 )
 
 // Audit records the outcome of a write attempt that the guard allowed. It goes
@@ -54,13 +54,12 @@ func (p *Policy) auditBlocked(tool, camera string, dryRun bool, reason string) {
 	)
 }
 
-// clean scrubs credentials from, and bounds, text that may be agent controlled.
-// The log handler quotes or escapes control characters, so a newline cannot
-// forge a second record.
+// clean scrubs credentials from, and bounds, text that may be agent controlled,
+// to at most limit bytes including a trailing ellipsis when anything was cut.
+// The bound is applied before the scrub (redact.ScrubBounded), because Scrub
+// costs seconds per megabyte and the camera id is unvalidated agent input. The
+// log handler quotes or escapes control characters, so a newline cannot forge
+// a second record.
 func clean(s string, limit int) string {
-	s = redact.Scrub(s)
-	if len(s) > limit {
-		s = strings.ToValidUTF8(s[:limit], "") + "..."
-	}
-	return s
+	return redact.ScrubBounded(s, limit, "...")
 }

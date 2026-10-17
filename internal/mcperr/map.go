@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/0x524A/rtspeek/pkg/rtspeek"
 	onvif "github.com/0x524a/onvif-go"
@@ -241,19 +240,12 @@ const maxTextLen = 4096
 
 const ellipsis = "\u2026"
 
-// cleanText scrubs s and then truncates the result to maxTextLen bytes with a
-// trailing ellipsis. Scrubbing must come first: truncating before Scrub could
-// split a secret and leave a fragment Scrub no longer recognises.
+// cleanText scrubs s and truncates the result to maxTextLen bytes with a
+// trailing ellipsis. The input is bounded before Scrub runs, since Scrub is
+// slow on huge strings, with the cut-straddling-a-secret guard that
+// redact.ScrubBounded documents.
 func cleanText(s string) string {
-	s = redact.Scrub(s)
-	if len(s) <= maxTextLen {
-		return s
-	}
-	cut := maxTextLen - len(ellipsis)
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + ellipsis
+	return redact.ScrubBounded(s, maxTextLen, ellipsis)
 }
 
 // sanitize scrubs and length-caps every free-text field of te, as defence in

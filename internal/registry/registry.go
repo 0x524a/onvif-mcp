@@ -193,8 +193,15 @@ func (r *Registry) Get(id string) (*Entry, error) {
 			return e, nil
 		}
 	}
+	// id is agent input; quoting all of an enormous one costs real time.
+	if len(id) > maxIDInError {
+		id = strings.ToValidUTF8(id[:maxIDInError], "") + "..."
+	}
 	return nil, fmt.Errorf("%w: %q", ErrUnknownCamera, id)
 }
+
+// maxIDInError bounds how much of an unknown camera id Get puts in its error.
+const maxIDInError = 128
 
 // List returns every configured camera, ordered by ID. No network call. The
 // result is a fresh slice; mutating it does not affect the registry.

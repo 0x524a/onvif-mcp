@@ -9,6 +9,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/0x524a/onvif-mcp/internal/mcperr"
+	"github.com/0x524a/onvif-mcp/internal/redact"
 	"github.com/0x524a/onvif-mcp/internal/safety"
 )
 
@@ -98,6 +99,9 @@ func GuardedTool[In, Data any](
 	}
 }
 
+// maxEchoedCamera bounds the camera id echoed back in an error.
+const maxEchoedCamera = 256
+
 // readTool registers a read-only tool through GuardedTool.
 func readTool[In, Data any](srv *mcp.Server, d Deps, t *mcp.Tool, h mcp.ToolHandlerFor[In, mcperr.Out[Data]]) {
 	GuardedTool(srv, d, safety.RiskRead, t, h, nil)
@@ -133,10 +137,10 @@ func claimName(srv *mcp.Server, name string) {
 }
 
 // cancelled audits and reports a call that was stopped before it started.
-func cancelled[Data any](d Deps, tool, camera string, dry bool) (*mcp.CallToolResult, mcperr.Out[Data], error) {
+func cancelled[Data any](d Deps, tool, camera, shown string, dry bool) (*mcp.CallToolResult, mcperr.Out[Data], error) {
 	d.Policy.Audit(tool, camera, dry, false, "cancelled")
 	return fail[Data](&mcperr.ToolError{
-		Code: mcperr.CodeInternal, Camera: camera, Operation: tool,
+		Code: mcperr.CodeInternal, Camera: shown, Operation: tool,
 		Message: "the call was cancelled before it started, so nothing was sent to the camera",
 		Hint:    "the server may be shutting down or the request was cancelled; check the camera with a read tool before repeating the call",
 	})
@@ -158,11 +162,14 @@ func guardedHandler[In, Data any](
 			})
 		}
 		camera, dry := wi.CameraID(), wi.IsDryRun()
+		// camera is agent input of any size. Everything below that echoes it
+		// uses the bounded, scrubbed form so no path scrubs a huge string.
+		shown := redact.ScrubBounded(camera, maxEchoedCamera, "...")
 
 		ctx, cancel := d.Scope(ctx)
 		defer cancel()
 		if err := ctx.Err(); err != nil {
-			return cancelled[Data](d, tool, camera, dry)
+			return cancelled[Data](d, tool, camera, shown, dry)
 		}
 
 		dec := d.Policy.Evaluate(camera, tool, dry)
@@ -172,7 +179,7 @@ func guardedHandler[In, Data any](
 		// Evaluate may have spent rate budget; do not start the write if the
 		// call was cancelled or the server began shutting down meanwhile.
 		if err := ctx.Err(); err != nil {
-			return cancelled[Data](d, tool, camera, dry)
+			return cancelled[Data](d, tool, camera, shown, dry)
 		}
 
 		executed, outcome := false, "panic"
@@ -182,7 +189,7 @@ func guardedHandler[In, Data any](
 				// it can carry anything the handler held, including secrets.
 				outcome = "panic"
 				res, out, err = fail[Data](&mcperr.ToolError{
-					Code: mcperr.CodeInternal, Camera: camera, Operation: tool,
+					Code: mcperr.CodeInternal, Camera: shown, Operation: tool,
 					Message: "the tool failed unexpectedly",
 					Hint:    "do not retry in a loop; the camera state is unknown, so check it with a read tool and report this to the operator",
 				})

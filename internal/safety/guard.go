@@ -142,7 +142,7 @@ func (p *Policy) WriteRegistered() bool { return p != nil && p.ControlEnabled }
 // limiter, so its memory is bounded by the config, not by the agent.
 func (p *Policy) Evaluate(camera, tool string, dryRun bool) Decision {
 	if p == nil {
-		return Decision{DryRun: dryRun, Blocked: blocked(camera, tool,
+		return Decision{DryRun: dryRun, Blocked: blocked(clean(camera, maxErrCamera), tool,
 			"write policy is not configured", nil)}
 	}
 	refuse := func(te *mcperr.ToolError, reason string) Decision {
@@ -159,7 +159,7 @@ func (p *Policy) Evaluate(camera, tool string, dryRun bool) Decision {
 	if entry == nil {
 		return refuse(&mcperr.ToolError{
 			Code:      mcperr.CodeNotFound,
-			Camera:    camera,
+			Camera:    clean(camera, maxErrCamera),
 			Operation: tool,
 			Message:   "no camera with that id is configured",
 			Hint:      "call camera.list to see the configured camera ids",

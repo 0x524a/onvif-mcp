@@ -408,3 +408,34 @@ func TestPolicyDoesNotFormatCredentials(t *testing.T) {
 		t.Errorf("policy formatting leaks a credential: %s", s)
 	}
 }
+
+// The camera id is agent input and reaches the scrubber on every refusal, so
+// an enormous one must not cost seconds of CPU.
+func TestHugeCameraIDIsBoundedBeforeScrubbing(t *testing.T) {
+	big := strings.Repeat("a:b@", 2_500_000) // 10 MB
+	p, buf, _ := newPolicy(true)
+	for name, pol := range map[string]*Policy{"unknown camera": p, "nil policy": nil} {
+		t0 := time.Now()
+		d := pol.Evaluate(big, tool, false)
+		if el := time.Since(t0); el > 500*time.Millisecond {
+			t.Errorf("%s: Evaluate took %v", name, el)
+		}
+		if d.Blocked == nil || len(d.Blocked.Camera) > 300 {
+			t.Errorf("%s: blocked camera not bounded: %d bytes", name, len(d.Blocked.Camera))
+		}
+	}
+	for _, r := range buf.records(t) {
+		if c, _ := r["camera"].(string); len(c) > 64 || !strings.HasSuffix(c, "...") {
+			t.Errorf("audit camera = %q", c)
+		}
+	}
+}
+
+func TestAuditCleanMarksEveryCutAndKeepsShortText(t *testing.T) {
+	if got := clean("cam-a", 64); got != "cam-a" {
+		t.Errorf("short text changed: %q", got)
+	}
+	if got := clean(strings.Repeat("x", 100), 64); len(got) != 64 || !strings.HasSuffix(got, "...") {
+		t.Errorf("clean = %q", got)
+	}
+}

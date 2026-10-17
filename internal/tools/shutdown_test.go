@@ -77,3 +77,23 @@ func TestWriteIsNotStartedWhenShutdownHasBegun(t *testing.T) {
 		}
 	}
 }
+
+func TestHugeCameraIDIsNotScrubbedWholeOnTheCancelledPath(t *testing.T) {
+	base, cancelBase := context.WithCancel(context.Background())
+	cancelBase()
+	policy := safety.NewPolicy(safety.PolicyOptions{ControlEnabled: true, Log: quietLog()})
+	h := guardedHandler(Deps{Base: base, Policy: policy}, "test.nudge", nudgeNoop, nudgeNoop)
+	big := make([]byte, 10<<20)
+	for i := range big {
+		big[i] = "a:b@"[i%4]
+	}
+	in := nudgeIn{WriteBase: safety.WriteBase{Camera: string(big), DryRun: new(bool)}}
+	t0 := time.Now()
+	res, out, err := h(context.Background(), nil, in)
+	if el := time.Since(t0); el > 500*time.Millisecond {
+		t.Errorf("handler took %v", el)
+	}
+	if err != nil || !res.IsError || out.Error == nil || len(out.Error.Camera) > 300 {
+		t.Errorf("res=%v err=%v out=%+v", res, err, out.Error)
+	}
+}
