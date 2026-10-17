@@ -47,6 +47,11 @@ func (d Deps) Scope(ctx context.Context) (context.Context, context.CancelFunc) {
 		return ctx, cancel
 	}
 	stop := context.AfterFunc(d.Base, cancel)
+	// AfterFunc runs cancel on its own goroutine, so a Base that is already
+	// done would leave ctx live for a while. Cancel synchronously instead.
+	if d.Base.Err() != nil {
+		cancel()
+	}
 	return ctx, func() { stop(); cancel() }
 }
 

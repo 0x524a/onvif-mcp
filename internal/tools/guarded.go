@@ -132,6 +132,16 @@ func claimName(srv *mcp.Server, name string) {
 	set[name] = struct{}{}
 }
 
+// cancelled audits and reports a call that was stopped before it started.
+func cancelled[Data any](d Deps, tool, camera string, dry bool) (*mcp.CallToolResult, mcperr.Out[Data], error) {
+	d.Policy.Audit(tool, camera, dry, false, "cancelled")
+	return fail[Data](&mcperr.ToolError{
+		Code: mcperr.CodeInternal, Camera: camera, Operation: tool,
+		Message: "the call was cancelled before it started, so nothing was sent to the camera",
+		Hint:    "the server may be shutting down or the request was cancelled; check the camera with a read tool before repeating the call",
+	})
+}
+
 // guardedHandler wraps run and dryRun in the guard. See GuardedTool.
 func guardedHandler[In, Data any](
 	d Deps, tool string, run, dryRun mcp.ToolHandlerFor[In, mcperr.Out[Data]],
@@ -149,13 +159,21 @@ func guardedHandler[In, Data any](
 		}
 		camera, dry := wi.CameraID(), wi.IsDryRun()
 
+		ctx, cancel := d.Scope(ctx)
+		defer cancel()
+		if err := ctx.Err(); err != nil {
+			return cancelled[Data](d, tool, camera, dry)
+		}
+
 		dec := d.Policy.Evaluate(camera, tool, dry)
 		if dec.Blocked != nil {
 			return fail[Data](dec.Blocked)
 		}
-
-		ctx, cancel := d.Scope(ctx)
-		defer cancel()
+		// Evaluate may have spent rate budget; do not start the write if the
+		// call was cancelled or the server began shutting down meanwhile.
+		if err := ctx.Err(); err != nil {
+			return cancelled[Data](d, tool, camera, dry)
+		}
 
 		executed, outcome := false, "panic"
 		defer func() {
