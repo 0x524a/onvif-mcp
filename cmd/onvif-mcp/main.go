@@ -16,6 +16,7 @@ import (
 	"github.com/0x524a/onvif-mcp/internal/config"
 	"github.com/0x524a/onvif-mcp/internal/mcpserver"
 	"github.com/0x524a/onvif-mcp/internal/registry"
+	"github.com/0x524a/onvif-mcp/internal/safety"
 	"github.com/0x524a/onvif-mcp/internal/stdio"
 )
 
@@ -69,11 +70,18 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	for _, s := range reg.List() {
 		log.Info("camera", "id", s.ID, "control_allowed", s.Control)
 	}
-	log.Info("starting", "control_enabled", *enableControl, "transport", "stdio")
+	// The audit trail goes to the same stderr logger: stdout is JSON-RPC.
+	policy := safety.NewPolicy(safety.PolicyOptions{
+		ControlEnabled: cfg.ControlEnabled,
+		Cameras:        reg,
+		Log:            log,
+	})
+	log.Info("starting", "control_enabled", cfg.ControlEnabled, "write_tools_registered", policy.WriteRegistered(),
+		"transport", "stdio")
 
 	// ctx is also the base context of every tool call, so a signal aborts
 	// in-flight camera I/O instead of waiting for it to time out.
-	srv := mcpserver.New(reg, log, mcpserver.WithBaseContext(ctx))
+	srv := mcpserver.New(reg, log, policy, mcpserver.WithBaseContext(ctx))
 	tr := stdio.NewTransport(stdin, stdout, stdio.MaxLineBytes, log)
 	err = srv.Run(ctx, tr)
 	if err != nil && !errors.Is(err, context.Canceled) && !isStdinClosed(err) {

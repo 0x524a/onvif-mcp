@@ -57,7 +57,8 @@ func newTestServer(t *testing.T, withDead bool) (*mcp.Server, *testcam.Cam) {
 			Username: "u", Password: "dead-camera-secret", TimeoutSeconds: 2,
 		}
 	}
-	return New(registry.New(cfg), quietLog()), cam
+	reg := registry.New(cfg)
+	return New(reg, quietLog(), testPolicy(reg, false)), cam
 }
 
 func findTool(t *testing.T, cs *mcp.ClientSession, name string) *mcp.Tool {
@@ -293,7 +294,8 @@ func TestSummarize(t *testing.T) {
 }
 
 func TestEmptyConfigListsNothing(t *testing.T) {
-	srv := New(registry.New(&config.Config{}), quietLog())
+	reg := registry.New(&config.Config{})
+	srv := New(reg, quietLog(), testPolicy(reg, false))
 	res := callList(t, connect(t, srv), map[string]any{"probe": true})
 	if res.IsError {
 		t.Fatalf("empty config must not be an error: %+v", res.Content)
@@ -433,7 +435,8 @@ func hungServer(t *testing.T, opts ...Option) *mcp.Server {
 	cfg := &config.Config{Cameras: map[string]*config.Camera{
 		"hung": {ID: "hung", Endpoint: hangListener(t), Username: "u", Password: "p", TimeoutSeconds: 60},
 	}}
-	return New(registry.New(cfg), quietLog(), opts...)
+	reg := registry.New(cfg)
+	return New(reg, quietLog(), testPolicy(reg, false), opts...)
 }
 
 func TestBaseContextCancelAbortsInFlightProbe(t *testing.T) {

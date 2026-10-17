@@ -478,21 +478,45 @@ func TestEnableControlFlag(t *testing.T) {
 			if len(cams) != 1 {
 				t.Fatalf("structuredContent = %v", sc)
 			}
-			// Today the registry reports only the camera's own opt-in
-			// (control: true in the config); nothing consults the
-			// process-wide flag until the write tools exist. What is
-			// testable now is that the flag is parsed and reported
-			// correctly alongside the per-camera opt-in, in the log lines
-			// below. When Phase 8 makes control_allowed depend on the flag,
-			// assert the wire value here too.
+			// The process-wide flag is observable on the wire: the policy
+			// resource reports it, and it is registered either way.
+			s.send(map[string]any{"jsonrpc": "2.0", "id": 3, "method": "resources/read",
+				"params": map[string]any{"uri": "onvif://server/policy"}})
+			rr, _ := s.recv()["result"].(map[string]any)
+			contents, _ := rr["contents"].([]any)
+			if len(contents) != 1 {
+				t.Fatalf("policy resource result = %v", rr)
+			}
+			var pol map[string]any
+			if err := json.Unmarshal([]byte(contents[0].(map[string]any)["text"].(string)), &pol); err != nil {
+				t.Fatal(err)
+			}
+			if pol["control_enabled"] != enabled {
+				t.Errorf("policy control_enabled = %v, want %v", pol["control_enabled"], enabled)
+			}
+			wantMode := "read-only"
+			if enabled {
+				wantMode = "control-enabled"
+			}
+			if pol["mode"] != wantMode {
+				t.Errorf("policy mode = %v, want %v", pol["mode"], wantMode)
+			}
+			grants, _ := pol["cameras"].([]any)
+			if len(grants) != 1 || grants[0].(map[string]any)["control_allowed"] != true {
+				t.Errorf("policy cameras = %v", pol["cameras"])
+			}
 			_ = s.stdin.Close()
 			if code, ok := s.wait(15 * time.Second); !ok || code != 0 {
 				t.Fatalf("ok=%v code=%d stderr=%s", ok, code, se)
 			}
 			log := se.String()
-			want := fmt.Sprintf("control_enabled=%v", enabled)
-			if !strings.Contains(log, want) {
-				t.Errorf("stderr lacks %q:\n%s", want, log)
+			for _, want := range []string{
+				fmt.Sprintf("control_enabled=%v", enabled),
+				fmt.Sprintf("write_tools_registered=%v", enabled),
+			} {
+				if !strings.Contains(log, want) {
+					t.Errorf("stderr lacks %q:\n%s", want, log)
+				}
 			}
 			if !strings.Contains(log, "control_allowed=true") {
 				t.Errorf("stderr lacks control_allowed=true for the opted-in camera:\n%s", log)

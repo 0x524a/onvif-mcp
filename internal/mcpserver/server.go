@@ -12,6 +12,7 @@ import (
 	"github.com/0x524a/onvif-mcp/internal/mcperr"
 	"github.com/0x524a/onvif-mcp/internal/redact"
 	"github.com/0x524a/onvif-mcp/internal/registry"
+	"github.com/0x524a/onvif-mcp/internal/safety"
 	"github.com/0x524a/onvif-mcp/internal/tools"
 )
 
@@ -105,8 +106,11 @@ func argumentErrors(next mcp.MethodHandler) mcp.MethodHandler {
 	}
 }
 
-// New builds the server and registers the tool surface.
-func New(reg *registry.Registry, log *slog.Logger, opts ...Option) *mcp.Server {
+// New builds the server and registers the tool surface and the policy
+// resource. policy gates write tools (tools.GuardedTool) and is what the
+// onvif://server/policy resource describes; nil behaves as read-only. The
+// resource is registered whether or not control is enabled.
+func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts ...Option) *mcp.Server {
 	var o options
 	for _, f := range opts {
 		f(&o)
@@ -116,7 +120,7 @@ func New(reg *registry.Registry, log *slog.Logger, opts ...Option) *mcp.Server {
 		Version: version,
 	}, nil)
 	srv.AddReceivingMiddleware(argumentErrors)
-	deps := tools.Deps{Reg: reg, Log: log, Base: o.base}
+	deps := tools.Deps{Reg: reg, Log: log, Base: o.base, Policy: policy}
 
 	// Always tools.Add (which wraps the generic free function), never the srv.AddTool
 	// method: the method skips input validation and turns handler errors into
@@ -168,6 +172,19 @@ func New(reg *registry.Registry, log *slog.Logger, opts ...Option) *mcp.Server {
 	tools.RegisterImaging(srv, deps)
 	tools.RegisterPTZReads(srv, deps)
 	tools.RegisterCamera(srv, deps)
+
+	// No production write tool is registered yet. When one is, it goes through
+	// tools.GuardedTool with deps, which is what keeps it out of tools/list
+	// while control is disabled.
+
+	safety.RegisterPolicyResource(srv, policy, func() []safety.CameraGrant {
+		list := reg.List()
+		grants := make([]safety.CameraGrant, 0, len(list))
+		for _, c := range list {
+			grants = append(grants, safety.CameraGrant{ID: c.ID, ControlAllowed: c.Control})
+		}
+		return grants
+	})
 
 	log.Debug("tools registered", "count", 8)
 	return srv

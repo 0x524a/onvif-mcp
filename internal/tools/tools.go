@@ -18,6 +18,7 @@ import (
 	"github.com/0x524a/onvif-mcp/internal/mcperr"
 	"github.com/0x524a/onvif-mcp/internal/redact"
 	"github.com/0x524a/onvif-mcp/internal/registry"
+	"github.com/0x524a/onvif-mcp/internal/safety"
 )
 
 // maxTextChars bounds every text summary.
@@ -34,6 +35,9 @@ type Deps struct {
 	// Discover performs the WS-Discovery probe for camera.discover. Nil means
 	// DefaultDiscoverer. It is injectable so tests never touch the network.
 	Discover Discoverer
+	// Policy gates write tools. Nil means read-only: GuardedTool registers no
+	// write tool and the guard refuses everything.
+	Policy *safety.Policy
 }
 
 // Scope returns a context cancelled when either ctx or d.Base is done.
