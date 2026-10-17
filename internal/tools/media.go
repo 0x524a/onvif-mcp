@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 
+	onvif "github.com/0x524a/onvif-go"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/0x524a/onvif-mcp/internal/mcperr"
@@ -97,6 +98,73 @@ func dropFragment(raw string) string {
 	return u.String()
 }
 
+// profilesOf reduces the camera's profile list. Nil entries are skipped, a
+// repeated token keeps its first occurrence, and the list is capped at
+// maxProfiles with Total and Truncated reporting the rest.
+func profilesOf(ps []*onvif.Profile) ProfilesData {
+	out := ProfilesData{Profiles: make([]ProfileSummary, 0, min(len(ps), maxProfiles))}
+	seen := map[string]bool{}
+	for _, p := range ps {
+		if p == nil {
+			continue
+		}
+		tok := cleanString(p.Token, maxFieldRunes)
+		if seen[tok] {
+			out.DuplicatesDropped++
+			continue
+		}
+		seen[tok] = true
+		out.Total++
+		if len(out.Profiles) >= maxProfiles {
+			out.Truncated = true
+			continue
+		}
+		// Cleaned here, not only at the choke point: the text summary is built
+		// from these values before the choke point runs.
+		s := ProfileSummary{Token: tok, Name: cleanString(p.Name, maxFieldRunes), HasPTZ: p.PTZConfiguration != nil}
+		if v := p.VideoEncoderConfiguration; v != nil {
+			s.Encoding = cleanString(v.Encoding, maxFieldRunes)
+			if v.RateControl != nil {
+				s.Framerate = v.RateControl.FrameRateLimit
+			}
+			if v.Resolution != nil {
+				s.Width, s.Height = v.Resolution.Width, v.Resolution.Height
+			}
+		}
+		if p.VideoSourceConfiguration != nil {
+			s.SourceToken = cleanString(p.VideoSourceConfiguration.SourceToken, maxFieldRunes)
+		}
+		out.Profiles = append(out.Profiles, s)
+	}
+	return out
+}
+
+// streamURIOf validates and redacts a camera-reported stream URI. Every
+// failure is a device_fault with a fixed message: the URI itself may carry a
+// secret, so it is never echoed.
+func streamURIOf(camera string, u *onvif.MediaURI) (StreamURIData, *mcperr.ToolError) {
+	fault := func(msg, hint string) (StreamURIData, *mcperr.ToolError) {
+		return StreamURIData{}, &mcperr.ToolError{
+			Code: mcperr.CodeDeviceFault, Camera: camera, Operation: "GetStreamURI", Message: msg, Hint: hint,
+		}
+	}
+	if u == nil || u.URI == "" {
+		return fault("the camera returned no stream URI for this profile", profilesHint)
+	}
+	if len(u.URI) > maxURIChars {
+		return fault("the camera returned a stream URI longer than onvif-mcp accepts", "")
+	}
+	red, err := redact.Parse(u.URI)
+	if err != nil {
+		return fault("the camera returned a stream URI that could not be parsed", "")
+	}
+	return StreamURIData{
+		URI:                 dropFragment(red.String()),
+		InvalidAfterConnect: u.InvalidAfterConnect,
+		InvalidAfterReboot:  u.InvalidAfterReboot,
+	}, nil
+}
+
 // RegisterMedia registers media.profiles and media.stream_uri.
 func RegisterMedia(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetProfiles, media.go.
@@ -122,38 +190,7 @@ func RegisterMedia(srv *mcp.Server, d Deps) {
 		if err != nil {
 			return fail[ProfilesData](mcperr.FromError(err, in.Camera, "GetProfiles"))
 		}
-		out := ProfilesData{Profiles: make([]ProfileSummary, 0, min(len(ps), maxProfiles))}
-		seen := map[string]bool{}
-		for _, p := range ps {
-			if p == nil {
-				continue
-			}
-			tok := cleanString(p.Token, maxFieldRunes)
-			if seen[tok] {
-				out.DuplicatesDropped++
-				continue
-			}
-			seen[tok] = true
-			out.Total++
-			if len(out.Profiles) >= maxProfiles {
-				out.Truncated = true
-				continue
-			}
-			s := ProfileSummary{Token: p.Token, Name: p.Name, HasPTZ: p.PTZConfiguration != nil}
-			if v := p.VideoEncoderConfiguration; v != nil {
-				s.Encoding = v.Encoding
-				if v.RateControl != nil {
-					s.Framerate = v.RateControl.FrameRateLimit
-				}
-				if v.Resolution != nil {
-					s.Width, s.Height = v.Resolution.Width, v.Resolution.Height
-				}
-			}
-			if p.VideoSourceConfiguration != nil {
-				s.SourceToken = p.VideoSourceConfiguration.SourceToken
-			}
-			out.Profiles = append(out.Profiles, s)
-		}
+		out := profilesOf(ps)
 		return text(summarizeProfiles(out)), mcperr.OK(out), nil
 	})
 
@@ -180,30 +217,9 @@ func RegisterMedia(srv *mcp.Server, d Deps) {
 		if err != nil {
 			return fail[StreamURIData](withHint(mcperr.FromError(err, in.Camera, "GetStreamURI"), profilesHint))
 		}
-		if u == nil || u.URI == "" {
-			return fail[StreamURIData](&mcperr.ToolError{
-				Code: mcperr.CodeDeviceFault, Camera: in.Camera, Operation: "GetStreamURI",
-				Message: "the camera returned no stream URI for this profile",
-				Hint:    profilesHint,
-			})
-		}
-		if len(u.URI) > maxURIChars {
-			return fail[StreamURIData](&mcperr.ToolError{
-				Code: mcperr.CodeDeviceFault, Camera: in.Camera, Operation: "GetStreamURI",
-				Message: "the camera returned a stream URI longer than onvif-mcp accepts",
-			})
-		}
-		red, perr := redact.Parse(u.URI)
-		if perr != nil {
-			return fail[StreamURIData](&mcperr.ToolError{
-				Code: mcperr.CodeDeviceFault, Camera: in.Camera, Operation: "GetStreamURI",
-				Message: "the camera returned a stream URI that could not be parsed",
-			})
-		}
-		data := StreamURIData{
-			URI:                 dropFragment(red.String()),
-			InvalidAfterConnect: u.InvalidAfterConnect,
-			InvalidAfterReboot:  u.InvalidAfterReboot,
+		data, te := streamURIOf(in.Camera, u)
+		if te != nil {
+			return fail[StreamURIData](te)
 		}
 		return text("Stream URI for profile " + in.Profile + ": " + data.URI + " (credentials held server-side)."),
 			mcperr.OK(data), nil

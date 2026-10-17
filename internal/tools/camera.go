@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	onvif "github.com/0x524a/onvif-go"
 	"github.com/0x524a/onvif-go/discovery"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -274,6 +275,44 @@ func candidatesFrom(devs []*discovery.Device) discovered {
 	return r
 }
 
+// identityOf copies the identity fields; nil info (an empty reply) leaves them
+// absent.
+func identityOf(out *DescribeData, info *onvif.DeviceInformation) {
+	if info == nil {
+		return
+	}
+	out.Manufacturer = scrubField(info.Manufacturer)
+	out.Model = scrubField(info.Model)
+	out.FirmwareVersion = scrubField(info.FirmwareVersion)
+	out.SerialNumber = scrubField(info.SerialNumber)
+	out.HardwareID = scrubField(info.HardwareID)
+}
+
+// servicesOf lists the distinct, scrubbed service namespaces in sorted order,
+// capped at maxServices. Nil entries and empty namespaces are skipped. The
+// result is never nil, so it serialises as [] rather than null.
+func servicesOf(svcs []*onvif.Service) (list []string, total int, truncated bool) {
+	list = []string{}
+	seen := map[string]bool{}
+	for _, s := range svcs {
+		if s == nil || s.Namespace == "" {
+			continue
+		}
+		ns := scrubField(s.Namespace)
+		if !seen[ns] {
+			seen[ns] = true
+			list = append(list, ns)
+		}
+	}
+	sort.Strings(list)
+	total = len(list)
+	if total > maxServices {
+		list = list[:maxServices]
+		truncated = true
+	}
+	return list, total, truncated
+}
+
 // RegisterCamera registers camera.describe and camera.discover.
 func RegisterCamera(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetDeviceInformation and (*Client).GetServices, device.go.
@@ -301,34 +340,12 @@ func RegisterCamera(srv *mcp.Server, d Deps) {
 			CapabilitiesVerified: false,
 			CapabilitiesNote:     "services are advertised by the camera and not probed; an advertised service may still return a fault",
 		}
-		if info != nil {
-			out.Manufacturer = scrubField(info.Manufacturer)
-			out.Model = scrubField(info.Model)
-			out.FirmwareVersion = scrubField(info.FirmwareVersion)
-			out.SerialNumber = scrubField(info.SerialNumber)
-			out.HardwareID = scrubField(info.HardwareID)
-		}
+		identityOf(&out, info)
 		// GetServices is advisory: a camera may refuse it and still work.
 		listed := false
 		if svcs, serr := c.GetServices(ctx, false); serr == nil {
 			listed = true
-			seen := map[string]bool{}
-			for _, s := range svcs {
-				if s == nil || s.Namespace == "" {
-					continue
-				}
-				ns := scrubField(s.Namespace)
-				if !seen[ns] {
-					seen[ns] = true
-					out.AdvertisedServices = append(out.AdvertisedServices, ns)
-				}
-			}
-			sort.Strings(out.AdvertisedServices)
-			out.Total = len(out.AdvertisedServices)
-			if out.Total > maxServices {
-				out.AdvertisedServices = out.AdvertisedServices[:maxServices]
-				out.Truncated = true
-			}
+			out.AdvertisedServices, out.Total, out.Truncated = servicesOf(svcs)
 		}
 		msg := strings.TrimSpace(fmt.Sprintf("%s %s.", out.Manufacturer, out.Model))
 		if out.Manufacturer == "" && out.Model == "" {

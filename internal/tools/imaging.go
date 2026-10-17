@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	onvif "github.com/0x524a/onvif-go"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/0x524a/onvif-mcp/internal/mcperr"
@@ -35,6 +36,20 @@ func summarizeImaging(d ImagingData) string {
 	}, ", ") + "."
 }
 
+// imagingOf copies the four settings this tool reports; nil settings (a camera
+// that answered with an empty body) report nothing.
+func imagingOf(s *onvif.ImagingSettings) ImagingData {
+	if s == nil {
+		return ImagingData{}
+	}
+	return ImagingData{
+		Brightness:      finitePtr(s.Brightness),
+		ColorSaturation: finitePtr(s.ColorSaturation),
+		Contrast:        finitePtr(s.Contrast),
+		Sharpness:       finitePtr(s.Sharpness),
+	}
+}
+
 // RegisterImaging registers imaging.settings.
 func RegisterImaging(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetImagingSettings, imaging.go.
@@ -58,15 +73,7 @@ func RegisterImaging(srv *mcp.Server, d Deps) {
 		if err != nil {
 			return fail[ImagingData](withHint(mcperr.FromError(err, in.Camera, "GetImagingSettings"), sourceHint))
 		}
-		var out ImagingData
-		if s != nil {
-			out = ImagingData{
-				Brightness:      finitePtr(s.Brightness),
-				ColorSaturation: finitePtr(s.ColorSaturation),
-				Contrast:        finitePtr(s.Contrast),
-				Sharpness:       finitePtr(s.Sharpness),
-			}
-		}
+		out := imagingOf(s)
 		return text(summarizeImaging(out)), mcperr.OK(out), nil
 	})
 }

@@ -166,3 +166,27 @@ func fixtureWith(t *testing.T, bodies map[string]string, ptz bool) *httptest.Ser
 func fixtureCamera(srv *httptest.Server) *config.Camera {
 	return &config.Camera{ID: "fx", Endpoint: srv.URL + "/device_service", Username: "u", Password: "fixture-pw"}
 }
+
+// faultFixture answers GetCapabilities normally and every other operation with
+// a SOAP fault whose reason is reason (already XML-escaped).
+func faultFixture(t *testing.T, reason string) *httptest.Server {
+	t.Helper()
+	body := `<s:Fault><s:Code><s:Value>s:Receiver</s:Value></s:Code><s:Reason><s:Text xml:lang="en">` + reason + `</s:Text></s:Reason></s:Fault>`
+	var url string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/soap+xml")
+		if strings.Contains(string(raw), "GetCapabilities") {
+			_, _ = fmt.Fprintf(w, envelope, `<tds:GetCapabilitiesResponse xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><tds:Capabilities>`+
+				`<tt:Media xmlns:tt="http://www.onvif.org/ver10/schema"><tt:XAddr>`+url+`/media</tt:XAddr></tt:Media>`+
+				`<tt:Imaging xmlns:tt="http://www.onvif.org/ver10/schema"><tt:XAddr>`+url+`/imaging</tt:XAddr></tt:Imaging>`+
+				`</tds:Capabilities></tds:GetCapabilitiesResponse>`)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprintf(w, envelope, body)
+	}))
+	url = srv.URL
+	t.Cleanup(srv.Close)
+	return srv
+}

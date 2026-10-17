@@ -135,6 +135,62 @@ type StatusData struct {
 	DeviceError  string   `json:"device_error,omitempty" jsonschema:"error text the camera reports in its PTZ status; absent means none was reported"`
 }
 
+// statusOf copies a PTZ status; nil status (an empty reply) reports nothing.
+func statusOf(st *onvif.PTZStatus) StatusData {
+	var out StatusData
+	if st == nil {
+		return out
+	}
+	out.DeviceError = clip(redact.Scrub(st.Error))
+	out.Pan, out.Tilt, out.Zoom = positionOf(st.Position)
+	if st.MoveStatus != nil {
+		out.PanTiltState = clip(redact.Scrub(st.MoveStatus.PanTilt))
+		out.ZoomState = clip(redact.Scrub(st.MoveStatus.Zoom))
+	}
+	return out
+}
+
+// presetsOf reduces the camera's preset list: nil entries are skipped, a
+// repeated token keeps its first occurrence, and the list is capped at
+// maxPresets. noPos counts listed presets with no position at all.
+func presetsOf(presets []*onvif.PTZPreset) (out PresetsData, noPos int) {
+	out.Presets = make([]PresetSummary, 0, min(len(presets), maxPresets))
+	seen := map[string]bool{}
+	for _, p := range presets {
+		if p == nil {
+			continue
+		}
+		tok := cleanString(p.Token, maxFieldRunes)
+		if seen[tok] {
+			out.DuplicatesDropped++
+			continue
+		}
+		seen[tok] = true
+		out.Total++
+		if len(out.Presets) >= maxPresets {
+			out.Truncated = true
+			continue
+		}
+		s := PresetSummary{Token: clip(redact.Scrub(p.Token)), Name: clip(redact.Scrub(p.Name))}
+		s.Pan, s.Tilt, s.Zoom = positionOf(p.PTZPosition)
+		if s.Pan == nil && s.Tilt == nil && s.Zoom == nil {
+			noPos++
+		}
+		out.Presets = append(out.Presets, s)
+	}
+	return out, noPos
+}
+
+// configTokenFor returns the PTZ configuration token of the named profile, or
+// "" when the profile is absent or has no PTZ configuration.
+func configTokenFor(ps []*onvif.Profile, profile string) string {
+	p := findProfile(ps, profile)
+	if p == nil || p.PTZConfiguration == nil {
+		return ""
+	}
+	return p.PTZConfiguration.Token
+}
+
 // RegisterPTZReads registers ptz.status and ptz.presets.
 func RegisterPTZReads(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetStatus, ptz.go.
@@ -157,15 +213,7 @@ func RegisterPTZReads(srv *mcp.Server, d Deps) {
 		if err != nil {
 			return fail[StatusData](withHint(mcperr.FromError(err, in.Camera, "GetStatus"), profilesHint))
 		}
-		var out StatusData
-		if st != nil {
-			out.DeviceError = clip(redact.Scrub(st.Error))
-			out.Pan, out.Tilt, out.Zoom = positionOf(st.Position)
-			if st.MoveStatus != nil {
-				out.PanTiltState = clip(redact.Scrub(st.MoveStatus.PanTilt))
-				out.ZoomState = clip(redact.Scrub(st.MoveStatus.Zoom))
-			}
-		}
+		out := statusOf(st)
 		msg := "PTZ " + fmtPos(out.Pan, out.Tilt, out.Zoom) + "."
 		if out.PanTiltState != "" {
 			msg += " Pan/tilt " + out.PanTiltState + "."
@@ -195,37 +243,13 @@ func RegisterPTZReads(srv *mcp.Server, d Deps) {
 		if err != nil {
 			return fail[PresetsData](withHint(mcperr.FromError(err, in.Camera, "GetPresets"), profilesHint))
 		}
-		out := PresetsData{Presets: make([]PresetSummary, 0, min(len(presets), maxPresets))}
-		noPos := 0
-		seen := map[string]bool{}
-		for _, p := range presets {
-			if p == nil {
-				continue
-			}
-			tok := cleanString(p.Token, maxFieldRunes)
-			if seen[tok] {
-				out.DuplicatesDropped++
-				continue
-			}
-			seen[tok] = true
-			out.Total++
-			if len(out.Presets) >= maxPresets {
-				out.Truncated = true
-				continue
-			}
-			s := PresetSummary{Token: clip(redact.Scrub(p.Token)), Name: clip(redact.Scrub(p.Name))}
-			s.Pan, s.Tilt, s.Zoom = positionOf(p.PTZPosition)
-			if s.Pan == nil && s.Tilt == nil && s.Zoom == nil {
-				noPos++
-			}
-			out.Presets = append(out.Presets, s)
-		}
+		out, noPos := presetsOf(presets)
 		// GetProfiles does not populate limits; they come from GetConfiguration
 		// on the profile's PTZ configuration token. Failing to read them is not
 		// a failure of this tool: they are reported when available.
 		if ps, perr := c.GetProfiles(ctx); perr == nil {
-			if p := findProfile(ps, in.Profile); p != nil && p.PTZConfiguration != nil && p.PTZConfiguration.Token != "" {
-				if cfg, cerr := c.GetConfiguration(ctx, p.PTZConfiguration.Token); cerr == nil {
+			if tok := configTokenFor(ps, in.Profile); tok != "" {
+				if cfg, cerr := c.GetConfiguration(ctx, tok); cerr == nil {
 					out.Limits = limitsFor(cfg)
 				}
 			}
