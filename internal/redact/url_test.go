@@ -87,7 +87,7 @@ func TestScrubTable(t *testing.T) {
 		{"query mixed case", "http://h/s?x=1&ToKeN=" + pw, "http://h/s?x=1&ToKeN=REDACTED"},
 		{"query apikey", "http://h/s?apikey=" + pw + "&secret=" + pw + "&key=" + pw, "http://h/s?apikey=REDACTED&secret=REDACTED&key=REDACTED"},
 		{"query passwd pwd auth", "?passwd=" + pw + "&pwd=" + pw + "&auth=" + pw, "?passwd=REDACTED&pwd=REDACTED&auth=REDACTED"},
-		{"query benign kept", "http://h/s?channel=1&monkey=2", "http://h/s?channel=1&monkey=2"},
+		{"query benign kept", "http://h/s?channel=1&mode=2", "http://h/s?channel=1&mode=2"},
 		{"email-like kept", "contact ops@example.com", "contact ops@example.com"},
 		{"port not mistaken", "dial rtsp://h:554/p?e=1", "dial rtsp://h:554/p?e=1"},
 	}

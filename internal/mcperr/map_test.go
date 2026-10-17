@@ -270,3 +270,10 @@ func TestBlockedFields(t *testing.T) {
 		t.Error("RetryAfterSeconds must be nil")
 	}
 }
+
+func TestONVIFErrorBracketedNetPathScrubbed(t *testing.T) {
+	te := FromError(onvif.NewONVIFError("//admin:SECRETPW@h", "x", "y"), "cam", "Op")
+	assertNoLeak(t, te)
+	te = FromError(onvif.NewONVIFError("ter:Action", "//admin:SECRETPW@h", "x"), "cam", "Op")
+	assertNoLeak(t, te)
+}
