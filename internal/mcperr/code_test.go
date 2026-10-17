@@ -10,7 +10,7 @@ func TestRetryableByCode(t *testing.T) {
 	retryable := []Code{CodeUnreachable, CodeTimeout}
 	terminal := []Code{
 		CodeAuthFailed, CodeNotSupported, CodeNotFound,
-		CodeInvalidArgument, CodeDeviceFault, CodeInternal,
+		CodeInvalidArgument, CodeDeviceFault, CodeInternal, CodeBlockedByPolicy,
 	}
 	for _, c := range retryable {
 		if !c.Retryable() {
@@ -70,5 +70,36 @@ func TestCodeValuesAreStableStrings(t *testing.T) {
 	}
 	if len(want) != 9 {
 		t.Fatalf("taxonomy must stay closed at nine codes, got %d", len(want))
+	}
+}
+
+func TestToolErrorGoldenJSON(t *testing.T) {
+	after := 3
+	te := &ToolError{
+		Code: CodeDeviceFault, Retryable: false, Message: "m",
+		Camera: "cam-a", Operation: "op", Hint: "h",
+		RetryAfterSeconds: &after,
+		SOAP:              &SOAPFault{Code: "ter:Action", Reason: "why"},
+	}
+	b, err := json.Marshal(te)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"code":"device_fault","retryable":false,"message":"m","camera":"cam-a",` +
+		`"operation":"op","hint":"h","retry_after_seconds":3,` +
+		`"soap":{"code":"ter:Action","reason":"why"}}`
+	if string(b) != want {
+		t.Errorf("golden mismatch\n got %s\nwant %s", b, want)
+	}
+}
+
+func TestOutEnvelopeKeyNames(t *testing.T) {
+	ok, _ := json.Marshal(OK(demo{Name: "x"}))
+	if string(ok) != `{"data":{"name":"x"}}` {
+		t.Errorf("OK envelope: %s", ok)
+	}
+	fail, _ := json.Marshal(Fail[demo](&ToolError{Code: CodeInternal, Message: "m"}))
+	if string(fail) != `{"error":{"code":"internal","retryable":false,"message":"m"}}` {
+		t.Errorf("Fail envelope: %s", fail)
 	}
 }

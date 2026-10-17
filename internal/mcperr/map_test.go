@@ -2,6 +2,7 @@ package mcperr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -115,5 +116,157 @@ func TestBlockedCarriesRetryAfter(t *testing.T) {
 	}
 	if plain := Blocked("cam", "ptz.goto_preset", "control disabled", nil); plain.Retryable {
 		t.Error("a non-rate-limit block must not be retryable")
+	}
+}
+
+func TestAllSentinelsMapped(t *testing.T) {
+	cases := []struct {
+		err  error
+		want Code
+	}{
+		{onvif.ErrTimeout, CodeTimeout},
+		{onvif.ErrConnectionFailed, CodeUnreachable},
+		{onvif.ErrAuthenticationFailed, CodeAuthFailed},
+		{onvif.ErrAuthenticationRequired, CodeAuthFailed},
+		{onvif.ErrServiceNotSupported, CodeNotSupported},
+		{onvif.ErrPTZNotSupported, CodeNotSupported},
+		{onvif.ErrSnapshotNotSupported, CodeNotSupported},
+		{onvif.ErrProfileNotFound, CodeNotFound},
+		{onvif.ErrPresetNotFound, CodeNotFound},
+		{onvif.ErrVideoSourceNotFound, CodeNotFound},
+		{onvif.ErrInvalidParameter, CodeInvalidArgument},
+		{onvif.ErrInvalidEndpoint, CodeInvalidArgument},
+		{onvif.ErrInvalidEndpointFormat, CodeInvalidArgument},
+		{context.DeadlineExceeded, CodeTimeout},
+		{errors.New("unmapped"), CodeInternal},
+	}
+	for _, c := range cases {
+		te := FromError(c.err, "cam", "Op")
+		if te.Code != c.want {
+			t.Errorf("FromError(%v) = %s, want %s", c.err, te.Code, c.want)
+		}
+		if te.Retryable != te.Code.Retryable() {
+			t.Errorf("FromError(%v): Retryable %v disagrees with code %s", c.err, te.Retryable, te.Code)
+		}
+	}
+}
+
+func TestWrappedONVIFErrorAndDeadline(t *testing.T) {
+	oe := onvif.NewONVIFError("ter:Action", "Nope", "boom")
+	te := FromError(fmt.Errorf("get profiles: %w", oe), "cam", "Op")
+	if te.Code != CodeDeviceFault || te.SOAP == nil || te.SOAP.Code != "ter:Action" {
+		t.Errorf("wrapped ONVIFError not recognised: %+v", te)
+	}
+	te = FromError(fmt.Errorf("call: %w", context.DeadlineExceeded), "cam", "Op")
+	if te.Code != CodeTimeout || !te.Retryable {
+		t.Errorf("wrapped deadline not a retryable timeout: %+v", te)
+	}
+}
+
+func TestIsAuthSignal(t *testing.T) {
+	for _, s := range []string{"401", "HTTP 401 Unauthorized", "unauthorized", "UNAUTHORIZED", "not authorized", "Not Authorized", "ter:NotAuthorized"} {
+		if !isAuthSignal(s) {
+			t.Errorf("isAuthSignal(%q) = false", s)
+		}
+	}
+	for _, s := range []string{"", "ter:Action", "timeout", "40"} {
+		if isAuthSignal(s) {
+			t.Errorf("isAuthSignal(%q) = true", s)
+		}
+	}
+}
+
+func TestSOAPAuthSignalInEitherField(t *testing.T) {
+	cases := []struct{ name, code, reason string }{
+		{"code only", "ter:NotAuthorized", "something else"},
+		{"reason only", "ter:Action", "Sender not authorized"},
+		{"reason 401", "ter:Action", "HTTP 401"},
+		{"reason unauthorized", "ter:Action", "Unauthorized"},
+	}
+	for _, c := range cases {
+		te := FromError(onvif.NewONVIFError(c.code, c.reason, "msg"), "cam", "Op")
+		if te.Code != CodeAuthFailed {
+			t.Errorf("%s: got %s want auth_failed", c.name, te.Code)
+		}
+	}
+}
+
+func TestSOAPFaultFieldsScrubbed(t *testing.T) {
+	const leak = "rtsp://admin:SECRETPW@h/s" //nolint:gosec // fake test fixture
+	te := FromError(onvif.NewONVIFError("ter:"+leak, "reason "+leak, "msg "+leak), "cam "+leak, "op "+leak)
+	assertNoLeak(t, te)
+	if te.SOAP == nil || !strings.Contains(te.SOAP.Reason, "rtsp://h/s") {
+		t.Errorf("scrub destroyed useful text: %+v", te.SOAP)
+	}
+}
+
+func assertNoLeak(t *testing.T, te *ToolError) {
+	t.Helper()
+	b, err := json.Marshal(te)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "SECRETPW") {
+		t.Errorf("payload leaks credentials: %s", b)
+	}
+}
+
+func TestStreamErrorScrubbedEverywhere(t *testing.T) {
+	const leak = "rtsp://admin:SECRETPW@192.0.2.10/s1" //nolint:gosec // fake test fixture
+	cases := []error{
+		errors.New("dial " + leak + ": connection refused"),
+		errors.New("describe " + leak + ": 401 Unauthorized"),
+		fmt.Errorf("%s: %w", leak, rtspeek.ErrInvalidURL),
+		errors.New("weird " + leak),
+	}
+	for _, err := range cases {
+		te := FromStreamError(err, "cam "+leak, "op "+leak)
+		assertNoLeak(t, te)
+		if !strings.Contains(te.Message, "192.0.2.10") {
+			t.Errorf("scrub destroyed host: %s", te.Message)
+		}
+	}
+}
+
+func TestFromErrorHintCameraOperationScrubbed(t *testing.T) {
+	const leak = "rtsp://admin:SECRETPW@h/s" //nolint:gosec // fake test fixture
+	assertNoLeak(t, FromError(errors.New("x "+leak), "c "+leak, "o "+leak))
+	assertNoLeak(t, Blocked("c "+leak, "o "+leak, "m "+leak, nil))
+}
+
+func TestStreamArmsAndRetryable(t *testing.T) {
+	cases := []struct {
+		err  error
+		want Code
+	}{
+		{errors.New("RTSP 404 Not Found"), CodeNotFound},
+		{errors.New("unsupported scheme http"), CodeInvalidArgument},
+		{errors.New("Sender not authorized"), CodeAuthFailed}, // classifier says "other"
+		{errors.New("notauthorized"), CodeAuthFailed},         // classifier says "other"
+		{errors.New("connection closed after 401"), CodeAuthFailed},
+		{errors.New("dial tcp: connection refused"), CodeUnreachable},
+		{errors.New("read: i/o timeout"), CodeTimeout},
+		{errors.New("no such host"), CodeUnreachable},
+		{errors.New("totally unknown"), CodeInternal},
+		{rtspeek.ErrInvalidURL, CodeInvalidArgument},
+	}
+	for _, c := range cases {
+		te := FromStreamError(c.err, "cam", "Describe")
+		if te.Code != c.want {
+			t.Errorf("FromStreamError(%v) = %s, want %s", c.err, te.Code, c.want)
+		}
+		if te.Retryable != te.Code.Retryable() {
+			t.Errorf("FromStreamError(%v): Retryable %v disagrees with %s", c.err, te.Retryable, te.Code)
+		}
+	}
+}
+
+func TestBlockedFields(t *testing.T) {
+	te := Blocked("cam-a", "ptz.move", "control disabled", nil)
+	if te.Message != "control disabled" || te.Camera != "cam-a" || te.Operation != "ptz.move" {
+		t.Errorf("fields lost: %+v", te)
+	}
+	if te.RetryAfterSeconds != nil {
+		t.Error("RetryAfterSeconds must be nil")
 	}
 }

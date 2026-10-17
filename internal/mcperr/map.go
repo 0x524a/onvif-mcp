@@ -33,6 +33,27 @@ func FromError(err error, camera, operation string) *ToolError {
 	if err == nil {
 		return nil
 	}
+	return sanitize(fromError(err, camera, operation))
+}
+
+// sanitize scrubs every free-text field of te, as defence in depth: no
+// constructor path may emit credentials regardless of where the text came from.
+func sanitize(te *ToolError) *ToolError {
+	te.Message = redact.Scrub(te.Message)
+	te.Hint = redact.Scrub(te.Hint)
+	te.Camera = redact.Scrub(te.Camera)
+	te.Operation = redact.Scrub(te.Operation)
+	if te.SOAP != nil {
+		te.SOAP.Code = redact.Scrub(te.SOAP.Code)
+		te.SOAP.Reason = redact.Scrub(te.SOAP.Reason)
+	}
+	return te
+}
+
+func fromError(err error, camera, operation string) *ToolError {
+	if err == nil {
+		return nil
+	}
 	te := &ToolError{
 		Camera:    camera,
 		Operation: operation,
@@ -91,6 +112,13 @@ func FromStreamError(err error, camera, operation string) *ToolError {
 	if err == nil {
 		return nil
 	}
+	return sanitize(fromStreamError(err, camera, operation))
+}
+
+func fromStreamError(err error, camera, operation string) *ToolError {
+	if err == nil {
+		return nil
+	}
 	te := &ToolError{
 		Camera:    camera,
 		Operation: operation,
@@ -145,5 +173,5 @@ func Blocked(camera, operation, message string, retryAfterSeconds *int) *ToolErr
 		te.Retryable = true
 		te.RetryAfterSeconds = retryAfterSeconds
 	}
-	return te
+	return sanitize(te)
 }
