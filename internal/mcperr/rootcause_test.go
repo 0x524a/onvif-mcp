@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	onvif "github.com/0x524a/onvif-go"
+
+	"github.com/0x524a/onvif-mcp/internal/redact"
 )
 
 // chain builds the wrapper stack onvif-go and the registry put around a
@@ -115,5 +117,24 @@ func TestTimeoutHintNamesOperator(t *testing.T) {
 		if !strings.Contains(te.Hint, "ask the operator") || !strings.Contains(te.Hint, "timeout_seconds") {
 			t.Errorf("hint = %q", te.Hint)
 		}
+	}
+}
+
+// scrubWrap mirrors the registry's wrapper: its text is the scrubbed text of
+// the error it wraps, which then no longer ends with the inner text verbatim.
+type scrubWrap struct{ err error }
+
+func (e scrubWrap) Error() string { return redact.Scrub(e.err.Error()) }
+func (e scrubWrap) Unwrap() error { return e.err }
+
+func TestRootCauseSeesThroughAScrubbedWrapper(t *testing.T) {
+	inner := &url.Error{Op: "Post", URL: "http://admin:hunter2@192.0.2.10/onvif/device_service", Err: context.DeadlineExceeded} //nolint:gosec // fake test fixture
+	err := scrubWrap{fmt.Errorf("initialize c: %w", fmt.Errorf("failed to send HTTP request: %w", inner))}
+	te := FromError(err, "c", "GetProfiles")
+	if te.Message != "GetProfiles failed: context deadline exceeded" {
+		t.Errorf("message = %q", te.Message)
+	}
+	if te.Code != CodeTimeout {
+		t.Errorf("code = %s", te.Code)
 	}
 }
