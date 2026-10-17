@@ -3,14 +3,18 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/0x524a/onvif-mcp/internal/redact"
@@ -21,8 +25,13 @@ import (
 // refused rather than warned about.
 var ErrConfigPermissions = errors.New("config file must not be group- or world-readable")
 
+// ErrNotRegular is returned when the config path is a directory, FIFO, device
+// or other non-regular file.
+var ErrNotRegular = errors.New("config path is not a regular file")
+
 const (
 	defaultTimeout = 10 * time.Second
+	maxTimeoutSecs = 300
 	maxConfigBytes = 1 << 20
 	redactedMark   = "[REDACTED]"
 )
@@ -93,7 +102,9 @@ type Config struct {
 // the environment, and registers every password with redact so it is scrubbed
 // from any later error or log text.
 func Load(path string) (*Config, error) {
-	f, err := os.Open(path) //nolint:gosec // path is operator supplied
+	// O_NONBLOCK so opening a FIFO returns immediately instead of waiting for
+	// a writer; the Stat below then rejects it.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // path is operator supplied
 	if err != nil {
 		return nil, fmt.Errorf("open config: %w", err)
 	}
@@ -105,7 +116,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("stat config: %w", err)
 	}
 	if !st.Mode().IsRegular() {
-		return nil, errors.New("config path is not a regular file")
+		return nil, ErrNotRegular
 	}
 	if st.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("%w: %s has mode %v", ErrConfigPermissions, path, st.Mode().Perm())
@@ -120,8 +131,18 @@ func Load(path string) (*Config, error) {
 	}
 
 	var cfg Config
-	if err := json.Unmarshal(b, &cfg); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
 		return nil, parseError(err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("parse config: unexpected data after the top-level object")
+	}
+	if dup, err := duplicateCameraID(b); err != nil {
+		return nil, parseError(err)
+	} else if dup != "" {
+		return nil, fmt.Errorf("camera ID %q is defined more than once", redact.Scrub(dup))
 	}
 	if len(cfg.Cameras) == 0 {
 		return nil, errors.New("config defines no cameras")
@@ -135,7 +156,7 @@ func Load(path string) (*Config, error) {
 
 	envOwner := map[string]string{}
 	for _, id := range ids {
-		if !idRe.MatchString(id) {
+		if id == "." || id == ".." || !idRe.MatchString(id) {
 			return nil, fmt.Errorf("camera ID %q is invalid: must match [A-Za-z0-9._-]{1,64}", id)
 		}
 		key := envKey(id)
@@ -157,7 +178,16 @@ func Load(path string) (*Config, error) {
 		if hasUserinfo(cam.Endpoint) {
 			return nil, fmt.Errorf("camera %q endpoint embeds credentials (user:pass@host); use the username and password fields", id)
 		}
+		if err := checkEndpoint(cam.Endpoint); err != nil {
+			return nil, fmt.Errorf("camera %q endpoint %w", id, err)
+		}
+		if cam.TimeoutSeconds < 0 || cam.TimeoutSeconds > maxTimeoutSecs {
+			return nil, fmt.Errorf("camera %q timeout_seconds must be between 0 and %d", id, maxTimeoutSecs)
+		}
 		if v, ok := os.LookupEnv(envKey(id)); ok {
+			if v == "" {
+				return nil, fmt.Errorf("camera %q: environment variable %s is set but empty; unset it or give it a value", id, envKey(id))
+			}
 			cam.Password = v
 		}
 		if cam.Password != "" && !redact.RegisterSecret(cam.Password) {
@@ -174,6 +204,12 @@ func parseError(err error) error {
 	switch {
 	case errors.As(err, &syn):
 		return fmt.Errorf("parse config: invalid JSON at byte %d", syn.Offset)
+	case strings.HasPrefix(err.Error(), "json: unknown field "):
+		name, uerr := strconv.Unquote(strings.TrimPrefix(err.Error(), "json: unknown field "))
+		if uerr != nil || len(name) > 64 {
+			return errors.New("parse config: unknown field")
+		}
+		return fmt.Errorf("parse config: unknown field %q", redact.Scrub(name))
 	case errors.As(err, &typ):
 		return fmt.Errorf("parse config: field %q has the wrong type (expected %s)", redact.Scrub(typ.Field), typ.Type)
 	default:
@@ -201,4 +237,79 @@ func envKey(id string) string {
 	up := strings.ToUpper(id)
 	up = strings.NewReplacer("-", "_", ".", "_", " ", "_").Replace(up)
 	return "ONVIF_MCP_" + up + "_PASSWORD"
+}
+
+// checkEndpoint limits the scheme to none, http or https and requires a
+// parseable host. Its errors never include the endpoint text, because
+// url.Parse errors quote their input.
+func checkEndpoint(endpoint string) error {
+	ep := strings.TrimSpace(endpoint)
+	rest := ep
+	if i := strings.Index(ep, "://"); i >= 0 {
+		switch strings.ToLower(ep[:i]) {
+		case "http", "https":
+			rest = ep[i+3:]
+		default:
+			return errors.New("has an unsupported scheme (only http, https or none)")
+		}
+	}
+	u, err := url.Parse("http://" + rest)
+	if err != nil || u.Host == "" || u.User != nil || strings.HasSuffix(u.Host, ":") {
+		return errors.New("is not a valid host or URL")
+	}
+	if p := u.Port(); p != "" {
+		if n, err := strconv.Atoi(p); err != nil || n < 1 || n > 65535 {
+			return errors.New("has an invalid port")
+		}
+	}
+	return nil
+}
+
+// duplicateCameraID walks the already-validated JSON and returns the first
+// repeated key inside the top-level "cameras" object, or "".
+func duplicateCameraID(b []byte) (string, error) {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if _, err := dec.Token(); err != nil { // top-level '{'
+		return "", err
+	}
+	for dec.More() {
+		kt, err := dec.Token()
+		if err != nil {
+			return "", err
+		}
+		if key, _ := kt.(string); key != "cameras" {
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return "", err
+			}
+			continue
+		}
+		vt, err := dec.Token()
+		if err != nil {
+			return "", err
+		}
+		if d, ok := vt.(json.Delim); !ok || d != '{' {
+			continue // null; nothing to check
+		}
+		seen := map[string]bool{}
+		for dec.More() {
+			it, err := dec.Token()
+			if err != nil {
+				return "", err
+			}
+			id, _ := it.(string)
+			if seen[id] {
+				return id, nil
+			}
+			seen[id] = true
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return "", err
+			}
+		}
+		if _, err := dec.Token(); err != nil { // closing '}'
+			return "", err
+		}
+	}
+	return "", nil
 }
