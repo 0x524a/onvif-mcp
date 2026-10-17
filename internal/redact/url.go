@@ -6,12 +6,18 @@
 // registered secrets (RegisterSecret; config loading must register every
 // password), URL and key=value pattern passes, then a percent-decoded pass.
 //
+// Pattern scrubbing is best-effort defence in depth. RegisterSecret is the
+// guarantee for known passwords: a registered secret is removed wherever it
+// appears, in the raw, URL-escaped, JSON-escaped and Go-quoted forms it
+// documents.
+//
 // Explicit non-goals: free-form prose that contains a secret which is neither
 // inside a URL or a recognised key=value, "key": value or "key: value" form,
-// nor registered via RegisterSecret, is not detected. Nor are secrets that
-// have been transformed beyond percent-encoding or the encodings RegisterSecret
-// covers (base64, hashing, truncation, splitting across fields), and nor is
-// credential-bearing text that never passes through Scrub or a URL value.
+// nor registered via RegisterSecret, is not detected. Nor are secrets
+// transformed beyond those encodings (base64, hashes, upper-casing,
+// truncation, splitting across fields), credentials in multi-line header
+// continuations, or credential-bearing text that never passes through Scrub
+// or a URL value.
 package redact
 
 import (
@@ -78,6 +84,7 @@ func (r URL) Unredacted() string {
 var sensitiveSubstrings = []string{
 	"pass", "pwd", "pw", "token", "secret", "key", "auth", "cred",
 	"sig", "sid", "nonce", "response",
+	"pin", "code", "session", "cookie",
 }
 
 // colonSubstrings is the subset used for the "key: value" text form, where a
@@ -85,7 +92,7 @@ var sensitiveSubstrings = []string{
 // prose ("unexpected response: 500") than a credential.
 var colonSubstrings = []string{
 	"pass", "pwd", "pw", "token", "secret", "cred", "nonce", "apikey",
-	"authorization", "authenticate", "authentication",
+	"authorization", "authenticate", "authentication", "cookie",
 }
 
 const (
@@ -111,7 +118,7 @@ var (
 	// Scheme-less "user:pw@host". The password must not start with '/', so
 	// "scheme://..." is never mistaken for it; plain "user@host" (an email
 	// address) is deliberately left alone.
-	bareRe = regexp.MustCompile(delimSlash + `[^\s/@:]+:(?:[^\s/]\S*)?@`)
+	bareRe = regexp.MustCompile(delimSlash + `[^\s/@:]*:(?:[^\s/]\S*)?@`)
 
 	// key=value, including query strings and fragments. The value is a quoted
 	// string or runs to the next separator.
@@ -123,7 +130,7 @@ var (
 		`((?:proxy-?)?authorization|www-authenticate|proxy-authenticate|authentication-info)([ \t]*:[ \t]*)(?:([A-Za-z][A-Za-z0-9\-]*)[ \t]+)?[^\r\n]*`)
 	// JSON "key":"value", plain and backslash-escaped (JSON embedded in a
 	// string).
-	jsonRe    = regexp.MustCompile(`("([^"\\]{1,64})"[ \t\r\n]*:[ \t\r\n]*)("(?:[^"\\]|\\.)*"|[^\s,}\]"]+)`)
+	jsonKeyRe = regexp.MustCompile(`"([^"\\]{1,64})"[ \t\r\n]*:[ \t\r\n]*`)
 	escJSONRe = regexp.MustCompile(`(\\"([^"\\]{1,64})\\"[ \t]*:[ \t]*)(\\"(?:[^"\\]|\\[^"])*\\"|[^\s,}\]"\\]+)`)
 
 	tokenRe = regexp.MustCompile(`\S+`)
@@ -168,13 +175,7 @@ func Scrub(s string) string {
 }
 
 func scrubPatterns(s string) string {
-	s = jsonRe.ReplaceAllStringFunc(s, func(m string) string {
-		sub := jsonRe.FindStringSubmatch(m)
-		if !sensitiveKey(sub[2], sensitiveSubstrings) {
-			return m
-		}
-		return sub[1] + `"REDACTED"`
-	})
+	s = scrubJSON(s)
 	s = escJSONRe.ReplaceAllStringFunc(s, func(m string) string {
 		sub := escJSONRe.FindStringSubmatch(m)
 		if !sensitiveKey(sub[2], sensitiveSubstrings) {
@@ -202,13 +203,114 @@ func scrubPatterns(s string) string {
 		}
 		return sub[1] + sub[2] + "=REDACTED"
 	})
-	return colonRe.ReplaceAllStringFunc(s, func(m string) string {
-		sub := colonRe.FindStringSubmatch(m)
-		if strings.HasPrefix(sub[4], "//") || !colonSensitive(sub[2]) {
-			return m
+	return scrubColon(s)
+}
+
+// scrubColon redacts the value of sensitive "key: value" text. For an
+// unquoted value the whole rest of the line is taken (a password may contain
+// spaces), except for Authorization-style headers, which authHdrRe already
+// handled and which keep their single-token behaviour here.
+func scrubColon(s string) string {
+	var b strings.Builder
+	prev := 0
+	for _, m := range colonRe.FindAllStringSubmatchIndex(s, -1) {
+		if m[0] < prev {
+			continue
 		}
-		return sub[1] + sub[2] + sub[3] + "REDACTED"
-	})
+		key := s[m[4]:m[5]]
+		val := s[m[8]:m[9]]
+		if strings.HasPrefix(val, "//") || !colonSensitive(key) {
+			continue
+		}
+		end := m[1]
+		if c := val[0]; c != '"' && c != '\'' && !strings.Contains(normKey(key), "authenticat") && !strings.Contains(normKey(key), "authoriz") {
+			end = len(s)
+			if i := strings.IndexAny(s[m[8]:], "\r\n"); i >= 0 {
+				end = m[8] + i
+			}
+		}
+		b.WriteString(s[prev:m[8]])
+		b.WriteString("REDACTED")
+		prev = end
+	}
+	b.WriteString(s[prev:])
+	return b.String()
+}
+
+// scrubJSON redacts the value of every sensitive "key": value pair. The value
+// may be a string, a bare token, or an array/object, which is consumed whole
+// (brackets balanced, quote-aware; unterminated runs to the end of input).
+func scrubJSON(s string) string {
+	var b strings.Builder
+	prev, from := 0, 0
+	for from < len(s) {
+		loc := jsonKeyRe.FindStringSubmatchIndex(s[from:])
+		if loc == nil {
+			break
+		}
+		keyEnd, valStart := from+loc[3], from+loc[1]
+		if !sensitiveKey(s[from+loc[2]:keyEnd], sensitiveSubstrings) {
+			from = valStart
+			continue
+		}
+		end := jsonValueEnd(s, valStart)
+		if end == valStart {
+			from = valStart
+			continue
+		}
+		b.WriteString(s[prev:valStart])
+		b.WriteString(`"REDACTED"`)
+		prev, from = end, end
+	}
+	b.WriteString(s[prev:])
+	return b.String()
+}
+
+// jsonValueEnd returns the index just past the JSON value starting at i, or i
+// if there is no value there.
+func jsonValueEnd(s string, i int) int {
+	if i >= len(s) {
+		return i
+	}
+	switch s[i] {
+	case '"':
+		return jsonStringEnd(s, i)
+	case '[', '{':
+		depth := 0
+		for j := i; j < len(s); j++ {
+			switch s[j] {
+			case '"':
+				j = jsonStringEnd(s, j) - 1
+			case '[', '{':
+				depth++
+			case ']', '}':
+				depth--
+				if depth == 0 {
+					return j + 1
+				}
+			}
+		}
+		return len(s)
+	}
+	j := i
+	for j < len(s) && !strings.ContainsRune(" \t\r\n,}]\"", rune(s[j])) {
+		j++
+	}
+	return j
+}
+
+// jsonStringEnd returns the index just past the string starting at the quote
+// at i, or len(s) when unterminated.
+func jsonStringEnd(s string, i int) int {
+	for j := i + 1; j < len(s); j++ {
+		switch s[j] {
+		case '\\':
+			j++
+		case '"':
+			return j + 1
+		}
+	}
+	return len(s)
 }
 
 // scrubAuthority removes userinfo after every "scheme://".
