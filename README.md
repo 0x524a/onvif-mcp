@@ -75,6 +75,11 @@ onvif-mcp deliberately exposes a small surface. It does **not**:
   only; a human must add a camera to the config before it is addressable.
 - Verify advertised capabilities. `camera.describe` reports what a device claims,
   labelled as advertised rather than confirmed.
+- Fix quirks of the MCP SDK it is built on. A few JSON-RPC errors from go-sdk
+  v1.7.0 carry code `0` (for example `tools/list` before initialisation); they are
+  passed through as the SDK emits them. On stdio, inbound lines over 4 MiB and
+  lines that are not valid JSON-RPC 2.0 are answered with a `-32600` or `-32700`
+  error and dropped, and the session continues.
 
 ## Licence
 

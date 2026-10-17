@@ -10,18 +10,18 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/0x524a/onvif-mcp/internal/config"
 	"github.com/0x524a/onvif-mcp/internal/mcpserver"
 	"github.com/0x524a/onvif-mcp/internal/registry"
+	"github.com/0x524a/onvif-mcp/internal/stdio"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	code := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
 	stop()
 	os.Exit(code)
 }
@@ -33,7 +33,7 @@ func main() {
 // SDK writes to it after that point. The only other thing ever written to
 // stdout is the -version string, and only because the server is not started in
 // that case. Every log line goes to stderr.
-func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("onvif-mcp", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "path to the camera config file (required)")
@@ -71,11 +71,24 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	log.Info("starting", "control_enabled", *enableControl, "transport", "stdio")
 
-	err = mcpserver.New(reg, log).Run(ctx, &mcp.StdioTransport{})
-	if err != nil && !errors.Is(err, context.Canceled) {
+	// ctx is also the base context of every tool call, so a signal aborts
+	// in-flight camera I/O instead of waiting for it to time out.
+	srv := mcpserver.New(reg, log, mcpserver.WithBaseContext(ctx))
+	tr := stdio.NewTransport(stdin, stdout, stdio.MaxLineBytes, log)
+	err = srv.Run(ctx, tr)
+	if err != nil && !errors.Is(err, context.Canceled) && !isStdinClosed(err) {
 		log.Error("server stopped", "error", err)
 		return 1
 	}
 	log.Info("server stopped")
 	return 0
+}
+
+// isStdinClosed reports whether err is just the client closing stdin, which is
+// how an MCP client ends a stdio session. With a request in flight the SDK
+// reports it as "server is closing: EOF" (jsonrpc2.ErrServerClosing joined
+// with the read error as text), which errors.Is cannot see through, so the
+// text suffix is checked too.
+func isStdinClosed(err error) bool {
+	return errors.Is(err, io.EOF) || strings.HasSuffix(err.Error(), ": EOF")
 }

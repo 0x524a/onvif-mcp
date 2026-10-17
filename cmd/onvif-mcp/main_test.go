@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -177,9 +178,10 @@ func (s *syncBuf) String() string {
 	return s.b.String()
 }
 
-func startSession(t *testing.T, cfgPath string) (*session, *syncBuf) {
+func startSession(t *testing.T, cfgPath string, extraArgs ...string) (*session, *syncBuf) {
 	t.Helper()
-	cmd := exec.Command(binary(t), "-config", cfgPath) //nolint:gosec // test-built binary
+	args := append([]string{"-config", cfgPath}, extraArgs...)
+	cmd := exec.Command(binary(t), args...) //nolint:gosec // test-built binary
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -358,4 +360,188 @@ func TestStdioSessionExitsCleanlyOnSIGINT(t *testing.T) {
 		t.Errorf("unexpected stdout line after SIGINT: %q", l)
 	}
 	checkStderr(t, se.String(), pass)
+}
+
+// hangEndpoint accepts TCP connections and never answers, like a wedged camera.
+func hangEndpoint(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = l.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	return "http://" + l.Addr().String() + "/onvif/device_service"
+}
+
+func writeHungConfig(t *testing.T) string {
+	t.Helper()
+	return writeConfig(t, 0o600, hangEndpoint(t), "u", "hung-camera-pw")
+}
+
+func (s *session) initialize() {
+	s.t.Helper()
+	s.send(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]any{
+		"protocolVersion": "2025-06-18", "capabilities": map[string]any{},
+		"clientInfo": map[string]any{"name": "probe", "version": "0"}}})
+	if res, _ := s.recv()["result"].(map[string]any); res == nil {
+		s.t.Fatal("initialize failed")
+	}
+	s.send(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"})
+}
+
+func (s *session) sendProbe(id int) {
+	s.send(map[string]any{"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": map[string]any{
+		"name": "camera.list", "arguments": map[string]any{"probe": true}}})
+}
+
+// SIGTERM while a probe of a hung camera is in flight must not wait out the
+// 15s probe budget.
+func TestShutdownSignalDoesNotWaitForHungProbe(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGINT} {
+		t.Run(sig.String(), func(t *testing.T) {
+			s, se := startSession(t, writeHungConfig(t))
+			s.initialize()
+			s.sendProbe(2)
+			time.Sleep(500 * time.Millisecond) // let the probe reach the camera
+			start := time.Now()
+			if err := s.cmd.Process.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			code, ok := s.wait(10 * time.Second)
+			if !ok || code != 0 {
+				t.Fatalf("ok=%v code=%d stderr=%s", ok, code, se)
+			}
+			if d := time.Since(start); d > 3*time.Second {
+				t.Errorf("exit took %v after %v", d, sig)
+			}
+		})
+	}
+}
+
+// Closing stdin is the normal MCP shutdown, even with a request in flight.
+func TestStdinEOFWithRequestInFlightExitsZeroWithoutError(t *testing.T) {
+	s, se := startSession(t, writeHungConfig(t))
+	s.initialize()
+	s.sendProbe(2)
+	time.Sleep(300 * time.Millisecond)
+	_ = s.stdin.Close()
+	code, ok := s.wait(25 * time.Second)
+	if !ok || code != 0 {
+		t.Fatalf("ok=%v code=%d stderr=%s", ok, code, se)
+	}
+	if strings.Contains(se.String(), "level=ERROR") {
+		t.Errorf("clean EOF logged an error:\n%s", se)
+	}
+}
+
+func TestEnableControlFlag(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("enable-control=%v", enabled), func(t *testing.T) {
+			cam := testcam.Start(t)
+			body := fmt.Sprintf(`{"cameras":{"cam1":{"endpoint":%q,"username":%q,"password":%q,"control":true}}}`,
+				cam.Endpoint(), cam.Username(), cam.Password())
+			p := filepath.Join(t.TempDir(), "cameras.json")
+			if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var extra []string
+			if enabled {
+				extra = []string{"-enable-control"}
+			}
+			s, se := startSession(t, p, extra...)
+			s.initialize()
+			s.send(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": map[string]any{
+				"name": "camera.list", "arguments": map[string]any{}}})
+			call := s.recv()
+			sc, _ := call["result"].(map[string]any)["structuredContent"].(map[string]any)
+			cams, _ := sc["data"].(map[string]any)["cameras"].([]any)
+			if len(cams) != 1 {
+				t.Fatalf("structuredContent = %v", sc)
+			}
+			// Today the registry reports only the camera's own opt-in
+			// (control: true in the config); nothing consults the
+			// process-wide flag until the write tools exist. What is
+			// testable now is that the flag is parsed and reported
+			// correctly alongside the per-camera opt-in, in the log lines
+			// below. When Phase 8 makes control_allowed depend on the flag,
+			// assert the wire value here too.
+			_ = s.stdin.Close()
+			if code, ok := s.wait(15 * time.Second); !ok || code != 0 {
+				t.Fatalf("ok=%v code=%d stderr=%s", ok, code, se)
+			}
+			log := se.String()
+			want := fmt.Sprintf("control_enabled=%v", enabled)
+			if !strings.Contains(log, want) {
+				t.Errorf("stderr lacks %q:\n%s", want, log)
+			}
+			if !strings.Contains(log, "control_allowed=true") {
+				t.Errorf("stderr lacks control_allowed=true for the opted-in camera:\n%s", log)
+			}
+		})
+	}
+}
+
+func TestMalformedLinesDoNotEndTheSession(t *testing.T) {
+	cfg, pass := newConfig(t)
+	s, se := startSession(t, cfg)
+	s.initialize()
+	for _, bad := range []string{"{not json", "\x00\xff", `{"jsonrpc":"1.0","id":5,"method":"ping"}`, `"str"`} {
+		if _, err := s.stdin.Write([]byte(bad + "\n")); err != nil {
+			t.Fatal(err)
+		}
+		reply := s.recv()
+		e, _ := reply["error"].(map[string]any)
+		if e == nil || (e["code"] != float64(-32700) && e["code"] != float64(-32600)) {
+			t.Fatalf("bad line %q got %v", bad, reply)
+		}
+	}
+	// A line over the cap is rejected without being buffered whole.
+	big := `{"jsonrpc":"2.0","id":6,"method":"` + strings.Repeat("a", 5<<20) + `"}` + "\n"
+	if _, err := s.stdin.Write([]byte(big)); err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := s.recv()["error"].(map[string]any); e == nil || e["code"] != float64(-32600) {
+		t.Fatal("oversize line was not rejected with -32600")
+	}
+	s.handshakeCall(pass)
+	_ = s.stdin.Close()
+	if code, ok := s.wait(15 * time.Second); !ok || code != 0 {
+		t.Fatalf("ok=%v code=%d stderr=%s", ok, code, se)
+	}
+}
+
+// handshakeCall runs tools/list and camera.list on an initialised session.
+func (s *session) handshakeCall(pass string) {
+	s.t.Helper()
+	s.send(map[string]any{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": map[string]any{
+		"name": "camera.list", "arguments": map[string]any{"probe": true}}})
+	cr, _ := s.recv()["result"].(map[string]any)
+	if cr == nil || cr["isError"] == true {
+		s.t.Fatalf("camera.list failed after bad input: %v", cr)
+	}
+	for _, l := range s.all {
+		if strings.Contains(l, pass) {
+			s.t.Fatal("password present on stdout")
+		}
+	}
 }
