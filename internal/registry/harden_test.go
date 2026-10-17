@@ -299,3 +299,43 @@ func TestCancelledContextMakesNoRequest(t *testing.T) {
 		t.Errorf("cancel payload = %+v", te)
 	}
 }
+
+// A probe cancelled by its caller (client cancellation, server shutdown) is
+// not a statement about the camera: it must not be reported as unreachable or
+// as an internal error.
+func TestProbeCancelledIsNotACameraState(t *testing.T) {
+	h := newHangListener(t)
+	r := New(manyCameras(h.endpoint(), 3, 30))
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	got := r.Probe(ctx)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("Probe took %v after cancellation", d)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d statuses", len(got))
+	}
+	for _, s := range got {
+		if s.State != "" {
+			t.Errorf("%s: cancelled probe reported state %q", s.ID, s.State)
+		}
+		if s.ErrorCode != ErrorCodeCancelled {
+			t.Errorf("%s: error_code = %q, want %q", s.ID, s.ErrorCode, ErrorCodeCancelled)
+		}
+	}
+}
+
+func TestProbeCancelledBeforeStart(t *testing.T) {
+	r := New(manyCameras("http://127.0.0.1:1/onvif/device_service", 2, 5))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, s := range r.Probe(ctx) {
+		if s.State != "" || s.ErrorCode != ErrorCodeCancelled {
+			t.Errorf("%s = %+v, want not probed / cancelled", s.ID, s)
+		}
+	}
+}

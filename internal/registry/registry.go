@@ -45,6 +45,14 @@ const maxProbeInFlight = 8
 // context sets no sooner deadline.
 const defaultProbeBudget = 15 * time.Second
 
+// ErrorCodeCancelled is the Status.ErrorCode Probe sets on a camera whose probe
+// was cut short because the caller's context was cancelled (the client
+// cancelled the request, or the server is shutting down). It is not part of
+// the mcperr taxonomy: nothing was learned about the camera, so State stays
+// empty and the entry means "not probed". Tool handlers should not normally
+// return such entries; they return a tool error when their context is done.
+const ErrorCodeCancelled = "cancelled"
+
 // Probe states.
 const (
 	StateReachable   = "reachable"
@@ -209,6 +217,11 @@ func (r *Registry) List() []Status {
 // 20 hung cameras at 10s each is about 30s. With it, Probe returns within the
 // budget plus scheduling slack whatever N and the camera timeouts are; a
 // camera not finished by then is reported unreachable with a timeout code.
+//
+// Cancellation is different from a timeout. If ctx itself is cancelled (not
+// merely past the budget), each camera not yet answered is reported with an
+// empty State and ErrorCode ErrorCodeCancelled: it was not probed, so nothing
+// is claimed about it. Cameras that had already answered keep their result.
 func (r *Registry) Probe(ctx context.Context) []Status {
 	if r == nil || len(r.entries) == 0 {
 		return []Status{}
@@ -253,6 +266,12 @@ func (r *Registry) Probe(ctx context.Context) []Status {
 }
 
 func fillError(s *Status, id string, err error) {
+	if errors.Is(err, context.Canceled) {
+		s.State = ""
+		s.Error = "probe cancelled before the camera answered"
+		s.ErrorCode = ErrorCodeCancelled
+		return
+	}
 	te := mcperr.FromError(err, id, "probe")
 	s.State = StateUnreachable
 	s.Error = te.Message
