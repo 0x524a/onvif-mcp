@@ -23,12 +23,12 @@ func Version() string { return version }
 
 // ListIn is the input for camera.list.
 type ListIn struct {
-	Probe bool `json:"probe,omitempty" jsonschema:"contact each camera and report reachable or unreachable"`
+	Probe bool `json:"probe,omitempty" jsonschema:"contact each camera and report reachable or unreachable; default false, which contacts nothing and returns instantly"`
 }
 
 // ListData is what camera.list reports.
 type ListData struct {
-	Cameras []registry.Status `json:"cameras"`
+	Cameras []registry.Status `json:"cameras" jsonschema:"every configured camera, sorted by id"`
 }
 
 // summarize renders a short, human-readable account of a camera listing. It
@@ -123,13 +123,16 @@ func New(reg *registry.Registry, log *slog.Logger, opts ...Option) *mcp.Server {
 	// protocol errors instead of tool errors (go-sdk v1.7.0 server.go).
 	tools.Add(srv, &mcp.Tool{
 		Name: "camera.list",
-		Description: "List the cameras this server is configured with. Each entry has: id (the handle to use for " +
-			"other tools); endpoint (the camera's URL, credentials never included); control_allowed (whether " +
-			"state-changing tools may act on it). With probe=true each camera is also contacted and gets state " +
-			"(reachable or unreachable) and, when unreachable, error and error_code. Without probe nothing is " +
-			"contacted and state, error and error_code are absent. A dead camera never fails the call: it is " +
-			"reported in its own entry. probe has a built-in time budget, so a hung camera cannot stall it. " +
-			"The result is under data.cameras; error is set only if the call itself failed.",
+		Description: "Use this first: it lists the cameras this server is configured with, and every other camera " +
+			"tool needs one of these ids as camera. Each entry has: id (the handle to use for other tools); " +
+			"endpoint (the camera's URL, credentials never included); control_allowed (whether state-changing " +
+			"tools may act on it). With probe=true each camera is also contacted and gets state (reachable or " +
+			"unreachable) and, when unreachable, error and error_code. Without probe nothing is contacted and " +
+			"state, error and error_code are absent. A dead camera never fails the call: it is reported in its " +
+			"own entry. probe has a built-in time budget, so a hung camera cannot stall it. The result is " +
+			"under data.cameras; error is set only if the call itself failed. Does not find new cameras " +
+			"(camera.discover does that), does not check credentials beyond reaching the camera, and does " +
+			"not change anything.",
 		// Closed world: with probe=true this tool does contact cameras, but
 		// only the fixed set an operator wrote into the config. Only
 		// discovery, which reaches whatever answers on the network, is

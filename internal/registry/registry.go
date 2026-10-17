@@ -114,13 +114,14 @@ func (e Entry) LogValue() slog.Value {
 // Status is the display form of an entry, used by camera.list. It never
 // contains the password.
 type Status struct {
-	ID       string `json:"id"`
-	Endpoint string `json:"endpoint"`
-	State    string `json:"state,omitempty"` // "reachable" | "unreachable"; set only by Probe
-	Error    string `json:"error,omitempty"` // scrubbed mcperr message; set only by Probe
+	ID       string `json:"id" jsonschema:"the camera id; pass it as camera to every other tool"`
+	Endpoint string `json:"endpoint" jsonschema:"the camera's configured ONVIF URL, credentials never included"`
+	// State and Error are set only by Probe; Error is a scrubbed mcperr message.
+	State string `json:"state,omitempty" jsonschema:"reachable or unreachable; present only when probe was true"`
+	Error string `json:"error,omitempty" jsonschema:"why the camera could not be reached, credentials removed; present only when probe was true and the camera is unreachable"`
 	// ErrorCode is the mcperr taxonomy code for Error; set only by Probe.
-	ErrorCode string `json:"error_code,omitempty"`
-	Control   bool   `json:"control_allowed"`
+	ErrorCode string `json:"error_code,omitempty" jsonschema:"failure class of error (unreachable, timeout, auth_failed and so on); present only with error"`
+	Control   bool   `json:"control_allowed" jsonschema:"whether the operator enabled state-changing tools for this camera; the tools available today are all read-only and ignore it"`
 }
 
 // Registry maps camera ID to entry. It is read-only after New.

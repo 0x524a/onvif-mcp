@@ -16,10 +16,10 @@ const sourceHint = "call media.profiles and pass a video_source_token from its r
 // library models them as pointers and cameras vary in what they report; an
 // absent field was not reported.
 type ImagingData struct {
-	Brightness      *float64 `json:"brightness,omitempty"`
-	ColorSaturation *float64 `json:"color_saturation,omitempty"`
-	Contrast        *float64 `json:"contrast,omitempty"`
-	Sharpness       *float64 `json:"sharpness,omitempty"`
+	Brightness      *float64 `json:"brightness,omitempty" jsonschema:"brightness on the camera's own scale; ONVIF fixes no range and this tool does not read the camera's imaging options, so the number is only comparable with the same camera's other readings; absent means not reported"`
+	ColorSaturation *float64 `json:"color_saturation,omitempty" jsonschema:"color saturation on the camera's own scale (see brightness); absent means not reported"`
+	Contrast        *float64 `json:"contrast,omitempty" jsonschema:"contrast on the camera's own scale (see brightness); absent means not reported"`
+	Sharpness       *float64 `json:"sharpness,omitempty" jsonschema:"sharpness on the camera's own scale (see brightness); absent means not reported"`
 }
 
 func summarizeImaging(d ImagingData) string {
@@ -40,9 +40,12 @@ func RegisterImaging(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetImagingSettings, imaging.go.
 	Add(srv, &mcp.Tool{
 		Name: "imaging.settings",
-		Description: "Read a video source's imaging settings (brightness, color_saturation, contrast, " +
-			"sharpness). An absent field was not reported by the camera. Fails with not_supported if the " +
-			"camera has no imaging service.",
+		Description: "Use this to read how a camera's image is tuned: brightness, color_saturation, contrast and " +
+			"sharpness of one video source. Call media.profiles first and pass a video_source_token from it " +
+			"as source_token (not the profile token). Values are on the camera's own scale, which this tool " +
+			"does not report, so compare them only with the same camera's other readings. An absent field was " +
+			"not reported by the camera. Fails with not_supported if the camera has no imaging service. Does " +
+			"not change any setting and does not read exposure, focus or white balance.",
 		Annotations: ReadOnly("Get imaging settings"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SourceIn) (*mcp.CallToolResult, mcperr.Out[ImagingData], error) {
 		ctx, cancel := d.Scope(ctx)

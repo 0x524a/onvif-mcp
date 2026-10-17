@@ -140,7 +140,8 @@ func (d Deps) client(ctx context.Context, camera, op string) (*onvif.Client, *mc
 	}
 	c, err := e.Client(ctx)
 	if err != nil {
-		return nil, mcperr.FromError(err, camera, op)
+		// Connecting failed before op ran, so op is not what failed.
+		return nil, mcperr.FromError(err, camera, "Initialize")
 	}
 	return c, nil
 }
@@ -156,17 +157,17 @@ func withHint(te *mcperr.ToolError, hint string) *mcperr.ToolError {
 
 // CameraIn is the input shape shared by tools that address one camera.
 type CameraIn struct {
-	Camera string `json:"camera" jsonschema:"the camera id from camera.list"`
+	Camera string `json:"camera" jsonschema:"the camera id, taken from camera.list (its id field)"`
 }
 
 // ProfileIn addresses one media profile on one camera.
 type ProfileIn struct {
-	Camera  string `json:"camera" jsonschema:"the camera id from camera.list"`
-	Profile string `json:"profile" jsonschema:"the profile token from media.profiles"`
+	Camera  string `json:"camera" jsonschema:"the camera id, taken from camera.list (its id field)"`
+	Profile string `json:"profile" jsonschema:"a profile token, taken from media.profiles (its token field); for PTZ tools choose a profile with has_ptz true"`
 }
 
 // SourceIn addresses one video source.
 type SourceIn struct {
-	Camera      string `json:"camera" jsonschema:"the camera id from camera.list"`
-	SourceToken string `json:"source_token" jsonschema:"the video_source_token from media.profiles"`
+	Camera      string `json:"camera" jsonschema:"the camera id, taken from camera.list (its id field)"`
+	SourceToken string `json:"source_token" jsonschema:"a video source token, taken from media.profiles (its video_source_token field, not the profile token)"`
 }

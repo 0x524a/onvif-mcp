@@ -522,3 +522,117 @@ func TestArgumentErrorMessageIsScrubbed(t *testing.T) {
 		t.Errorf("echoed value must be scrubbed: %s", b)
 	}
 }
+
+// undescribed walks a JSON schema and returns the path of every property that
+// has no description, following array items, composition keywords and $defs.
+func undescribed(node any, path string, root map[string]any) []string {
+	m, ok := node.(map[string]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	if ref, _ := m["$ref"].(string); ref != "" {
+		// Resolve "#/$defs/Name" against the root.
+		if name, found := strings.CutPrefix(ref, "#/$defs/"); found {
+			if defs, ok := root["$defs"].(map[string]any); ok {
+				return undescribed(defs[name], path, root)
+			}
+		}
+	}
+	if props, ok := m["properties"].(map[string]any); ok {
+		for name, p := range props {
+			pm, _ := p.(map[string]any)
+			if d, _ := pm["description"].(string); strings.TrimSpace(d) == "" {
+				// A $ref'd definition may carry the description.
+				described := false
+				if ref, _ := pm["$ref"].(string); ref != "" {
+					if def, _ := root["$defs"].(map[string]any)[strings.TrimPrefix(ref, "#/$defs/")].(map[string]any); def != nil {
+						d, _ := def["description"].(string)
+						described = strings.TrimSpace(d) != ""
+					}
+				}
+				if !described {
+					out = append(out, path+"."+name)
+				}
+			}
+			out = append(out, undescribed(p, path+"."+name, root)...)
+		}
+	}
+	for _, k := range []string{"items", "additionalProperties"} {
+		out = append(out, undescribed(m[k], path+"[]", root)...)
+	}
+	for _, k := range []string{"anyOf", "oneOf", "allOf"} {
+		if arr, ok := m[k].([]any); ok {
+			for _, e := range arr {
+				out = append(out, undescribed(e, path, root)...)
+			}
+		}
+	}
+	return out
+}
+
+// Every field an agent can read or write is documented in the schema it is
+// shown: units, ranges and the meaning of absence cannot be guessed.
+func TestEveryToolSchemaFieldIsDescribed(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	cs := connect(t, srv)
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Tools) != 8 {
+		t.Fatalf("expected 8 tools, got %d", len(res.Tools))
+	}
+	for _, tool := range res.Tools {
+		for label, s := range map[string]any{"input": tool.InputSchema, "output": tool.OutputSchema} {
+			b, _ := json.Marshal(s)
+			var root map[string]any
+			if err := json.Unmarshal(b, &root); err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range undescribed(root, tool.Name+"."+label, root) {
+				t.Errorf("no description: %s", p)
+			}
+		}
+	}
+}
+
+// Each description tells an agent when to reach for the tool, what to call
+// first, and what the tool does not do.
+func TestToolDescriptionsGuideUse(t *testing.T) {
+	srv, _ := newTestServer(t, false)
+	cs := connect(t, srv)
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustHave := map[string][]string{
+		"camera.list":      {"first", "camera.discover"},
+		"camera.discover":  {"blocks", "10 seconds", "camera.list"},
+		"camera.describe":  {"camera.list", "not verified"},
+		"media.profiles":   {"camera.list", "has_ptz", "source_token"},
+		"media.stream_uri": {"media.profiles", "never", "Does not open"},
+		"ptz.status":       {"media.profiles", "has_ptz", "-1"},
+		"ptz.presets":      {"media.profiles", "has_ptz", "-1"},
+		"imaging.settings": {"media.profiles", "video_source_token", "scale"},
+	}
+	for _, tool := range res.Tools {
+		want, ok := mustHave[tool.Name]
+		if !ok {
+			t.Errorf("unexpected tool %s", tool.Name)
+			continue
+		}
+		d := tool.Description
+		if !strings.Contains(d, "Use ") && !strings.Contains(d, "Use this") {
+			t.Errorf("%s: description does not say when to use it: %q", tool.Name, d)
+		}
+		if !strings.Contains(d, "Does not") {
+			t.Errorf("%s: description does not say what it does not do: %q", tool.Name, d)
+		}
+		for _, w := range want {
+			if !strings.Contains(d, w) {
+				t.Errorf("%s: description lacks %q: %q", tool.Name, w, d)
+			}
+		}
+	}
+}

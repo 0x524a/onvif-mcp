@@ -14,16 +14,16 @@ import (
 
 // Range is a reported min/max interval.
 type Range struct {
-	Min float64 `json:"min"`
-	Max float64 `json:"max"`
+	Min float64 `json:"min" jsonschema:"lowest value the camera accepts on this axis, in the camera's PTZ position space"`
+	Max float64 `json:"max" jsonschema:"highest value the camera accepts on this axis, in the camera's PTZ position space"`
 }
 
 // Limits mirrors the PTZ ranges a camera reports for a profile. Each axis is
 // a pointer: an axis the camera did not report is absent, never zero.
 type Limits struct {
-	Pan  *Range `json:"pan,omitempty"`
-	Tilt *Range `json:"tilt,omitempty"`
-	Zoom *Range `json:"zoom,omitempty"`
+	Pan  *Range `json:"pan,omitempty" jsonschema:"allowed pan interval; absent means the camera reported no pan limit"`
+	Tilt *Range `json:"tilt,omitempty" jsonschema:"allowed tilt interval; absent means the camera reported no tilt limit"`
+	Zoom *Range `json:"zoom,omitempty" jsonschema:"allowed zoom interval; absent means the camera reported no zoom limit"`
 }
 
 func rangeOf(r *onvif.FloatRange) *Range {
@@ -101,24 +101,24 @@ func fmtPos(pan, tilt, zoom *float64) string {
 // PresetSummary is one PTZ preset. Position fields are absent when the camera
 // stored or reported no position for the preset.
 type PresetSummary struct {
-	Token string   `json:"token"`
-	Name  string   `json:"name,omitempty"`
-	Pan   *float64 `json:"pan,omitempty"`
-	Tilt  *float64 `json:"tilt,omitempty"`
-	Zoom  *float64 `json:"zoom,omitempty"`
+	Token string   `json:"token" jsonschema:"the preset token, the handle a later tool would use to go to this preset"`
+	Name  string   `json:"name,omitempty" jsonschema:"human-readable preset name; absent means the camera reported none"`
+	Pan   *float64 `json:"pan,omitempty" jsonschema:"stored pan position; in ONVIF's generic space this is normalised from -1 to 1, otherwise in the camera's own space (compare reported_limits); absent means not reported"`
+	Tilt  *float64 `json:"tilt,omitempty" jsonschema:"stored tilt position; in ONVIF's generic space this is normalised from -1 to 1, otherwise in the camera's own space (compare reported_limits); absent means not reported"`
+	Zoom  *float64 `json:"zoom,omitempty" jsonschema:"stored zoom position; in ONVIF's generic space this runs from 0 to 1, otherwise in the camera's own space (compare reported_limits); absent means not reported"`
 }
 
 // PresetsData is the ptz.presets result.
 type PresetsData struct {
-	Presets []PresetSummary `json:"presets"`
+	Presets []PresetSummary `json:"presets" jsonschema:"the profile's stored presets in the order the camera reported them, at most 256, one per token; empty means the camera has none"`
 	// Total is the number of distinct preset tokens the camera reported.
-	Total int `json:"total"`
+	Total int `json:"total" jsonschema:"number of distinct preset tokens the camera reported, which can exceed the length of presets"`
 	// Truncated is true when Total exceeds the number listed.
-	Truncated bool `json:"truncated"`
+	Truncated bool `json:"truncated" jsonschema:"true when total is larger than the number of presets listed"`
 	// DuplicatesDropped counts presets dropped for repeating an earlier token;
 	// the first is kept.
-	DuplicatesDropped int     `json:"duplicates_dropped,omitempty"`
-	Limits            *Limits `json:"reported_limits,omitempty"`
+	DuplicatesDropped int     `json:"duplicates_dropped,omitempty" jsonschema:"number of presets left out because they repeated an earlier token; absent means none"`
+	Limits            *Limits `json:"reported_limits,omitempty" jsonschema:"movement limits of the profile's PTZ configuration, in the same space as the preset positions; absent means the camera reported none or they could not be read"`
 }
 
 // maxPresets bounds ptz.presets; ONVIF cameras commonly hold up to 255.
@@ -127,12 +127,12 @@ const maxPresets = 256
 // StatusData is the ptz.status result. Absent position fields were not
 // reported by the camera.
 type StatusData struct {
-	Pan          *float64 `json:"pan,omitempty"`
-	Tilt         *float64 `json:"tilt,omitempty"`
-	Zoom         *float64 `json:"zoom,omitempty"`
-	PanTiltState string   `json:"pan_tilt_state,omitempty"`
-	ZoomState    string   `json:"zoom_state,omitempty"`
-	DeviceError  string   `json:"device_error,omitempty"`
+	Pan          *float64 `json:"pan,omitempty" jsonschema:"current pan position; in ONVIF's generic space this is normalised from -1 to 1, otherwise in the camera's own space (ptz.presets reports the limits); absent means not reported"`
+	Tilt         *float64 `json:"tilt,omitempty" jsonschema:"current tilt position; in ONVIF's generic space this is normalised from -1 to 1, otherwise in the camera's own space (ptz.presets reports the limits); absent means not reported"`
+	Zoom         *float64 `json:"zoom,omitempty" jsonschema:"current zoom position; in ONVIF's generic space this runs from 0 to 1, otherwise in the camera's own space (ptz.presets reports the limits); absent means not reported"`
+	PanTiltState string   `json:"pan_tilt_state,omitempty" jsonschema:"pan/tilt movement state as the camera names it, normally IDLE, MOVING or UNKNOWN; absent means not reported"`
+	ZoomState    string   `json:"zoom_state,omitempty" jsonschema:"zoom movement state as the camera names it, normally IDLE, MOVING or UNKNOWN; absent means not reported"`
+	DeviceError  string   `json:"device_error,omitempty" jsonschema:"error text the camera reports in its PTZ status; absent means none was reported"`
 }
 
 // RegisterPTZReads registers ptz.status and ptz.presets.
@@ -140,8 +140,11 @@ func RegisterPTZReads(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetStatus, ptz.go.
 	Add(srv, &mcp.Tool{
 		Name: "ptz.status",
-		Description: "Read a profile's current PTZ position and movement state. An absent pan, tilt or zoom " +
-			"was not reported by the camera. Fails with not_supported if the camera has no PTZ service.",
+		Description: "Use this to see where a camera is pointing and whether it is moving. Call media.profiles first " +
+			"and pass the token of a profile with has_ptz true as profile. Pan and tilt are normalised -1 to 1 " +
+			"and zoom 0 to 1 when the camera uses ONVIF's generic position space; a camera may use its own " +
+			"space, and this tool does not say which. An absent pan, tilt or zoom was not reported by the " +
+			"camera. Fails with not_supported if the camera has no PTZ service. Does not move the camera.",
 		Annotations: ReadOnly("Get PTZ status"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ProfileIn) (*mcp.CallToolResult, mcperr.Out[StatusData], error) {
 		ctx, cancel := d.Scope(ctx)
@@ -173,9 +176,13 @@ func RegisterPTZReads(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetPresets and (*Client).GetConfiguration, ptz.go; (*Client).GetProfiles, media.go.
 	Add(srv, &mcp.Tool{
 		Name: "ptz.presets",
-		Description: "List a profile's stored PTZ presets (token, name, and pan/tilt/zoom when the camera " +
-			"reports them) and, when reported, the movement limits in reported_limits. Absent means not " +
-			"reported. Fails with not_supported if the camera has no PTZ service.",
+		Description: "Use this to list the named positions stored on a camera, and its movement limits. Call " +
+			"media.profiles first and pass the token of a profile with has_ptz true as profile. Each preset has " +
+			"token, name and, when the camera reports them, pan and tilt (normalised -1 to 1 in ONVIF's generic " +
+			"space) and zoom (0 to 1); reported_limits holds the movement limits when the camera reports " +
+			"them. Absent means not reported. At most 256 presets are listed; total and truncated say when " +
+			"there were more. Fails with not_supported if the camera has no PTZ service. Does not move the " +
+			"camera or go to a preset.",
 		Annotations: ReadOnly("List PTZ presets"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ProfileIn) (*mcp.CallToolResult, mcperr.Out[PresetsData], error) {
 		ctx, cancel := d.Scope(ctx)
