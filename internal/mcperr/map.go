@@ -264,6 +264,22 @@ func fromError(err error, camera, operation string) *ToolError {
 		errors.Is(err, onvif.ErrInvalidEndpointFormat):
 		te.Code = CodeInvalidArgument
 	default:
+		if f, prefix, ok := parseSOAPFault(err.Error()); ok {
+			te.SOAP = &SOAPFault{Code: f.Code, Reason: f.Reason}
+			te.Message = redact.Scrub(prefix + "SOAP fault: [" + f.Code + "] " + f.Reason)
+			switch {
+			case httpStatus(prefix) == 401 || httpStatus(prefix) == 403 || isAuthText(f.Code+" "+f.Reason):
+				te.Code = CodeAuthFailed
+				te.Hint = hintCredentials
+			case isNotFoundText(f.Code + " " + f.Reason):
+				te.Code = CodeNotFound
+				te.Hint = "list the available tokens first, then pass one of them"
+			default:
+				te.Code = CodeDeviceFault
+				te.Hint = "the device returned a SOAP fault; the operation may be advertised but not implemented"
+			}
+			break
+		}
 		if v, ok := classifyTransport(err); ok {
 			te.Code, te.Hint = v.code, v.hint
 			break
@@ -277,6 +293,32 @@ func fromError(err error, camera, operation string) *ToolError {
 	}
 	te.Retryable = te.Code.Retryable()
 	return te
+}
+
+// soapFaultRe matches onvif-go v1.2.0's fault text (internal/soap/soap.go,
+// faultError): "SOAP fault: [code] reason" with ": detail" appended when the
+// device sent one. The library returns it as a plain wrapped error, so the
+// text is all there is to parse.
+var soapFaultRe = regexp.MustCompile(`(?s)SOAP fault: \[([^\]]*)\] ?(.*)`)
+
+// parseSOAPFault extracts the fault code and reason from err text, and returns
+// the text before the fault marker (which may carry "HTTP request failed with
+// status N:"). Anything from the first '<' on is dropped: no raw XML body ever
+// reaches an agent. Only the first marker counts, so a fault reason that
+// itself mentions "status 404" cannot steer classification.
+func parseSOAPFault(s string) (f SOAPFault, prefix string, ok bool) {
+	loc := soapFaultRe.FindStringSubmatchIndex(s)
+	if loc == nil {
+		return SOAPFault{}, "", false
+	}
+	prefix = s[:loc[0]]
+	f.Code = strings.TrimSpace(s[loc[2]:loc[3]])
+	reason := s[loc[4]:loc[5]]
+	if i := strings.IndexByte(reason, '<'); i >= 0 {
+		reason = strings.TrimRight(reason[:i], " ") + " [xml omitted]"
+	}
+	f.Reason = strings.TrimSpace(reason)
+	return f, prefix, true
 }
 
 // isNotFoundText reports whether an unclassified error's text says a token or
