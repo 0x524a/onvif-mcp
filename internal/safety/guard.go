@@ -195,10 +195,9 @@ func (p *Policy) Evaluate(camera, tool string, dryRun bool) Decision {
 			"no rate limiter is configured, so movement is refused", nil, misconfiguredHint), ReasonNoRateLimiter)
 	}
 	if ok, after := p.Limiter.Allow(camera); !ok {
+		// Allow never reports a refusal with a wait under 1ns, so rounding up
+		// always yields at least one second.
 		secs := int(math.Ceil(after.Seconds()))
-		if secs < 1 {
-			secs = 1
-		}
 		return refuse(blocked(camera, tool,
 			"movement is rate limited to protect the camera's mechanism", &secs,
 			"wait retry_after_seconds, then repeat the call"), ReasonRateLimited)
