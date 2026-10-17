@@ -223,14 +223,25 @@ func scrubPatterns(s string) string {
 	s = opaqueRe.ReplaceAllString(s, "${1}${2}:")
 	s = netPathRe.ReplaceAllString(s, "${1}//")
 	s = bareRe.ReplaceAllString(s, "${1}")
-	s = kvRe.ReplaceAllStringFunc(s, func(m string) string {
+	s = scrubKV(s)
+	return scrubColon(s)
+}
+
+// scrubKV redacts the value of every sensitive key=value pair. The value of a
+// non-sensitive pair is scanned again, so a pair nested after another '='
+// ("source=password=x") is still found.
+func scrubKV(s string) string {
+	return kvRe.ReplaceAllStringFunc(s, func(m string) string {
 		sub := kvRe.FindStringSubmatch(m)
 		if !sensitiveKey(sub[2], sensitiveSubstrings) {
+			val := sub[3]
+			if strings.Contains(val, "=") {
+				return sub[1] + sub[2] + "=" + scrubKV(val)
+			}
 			return m
 		}
 		return sub[1] + sub[2] + "=REDACTED"
 	})
-	return scrubColon(s)
 }
 
 // scrubColon redacts the value of sensitive "key: value" text. For an
