@@ -12,6 +12,7 @@ import (
 	"github.com/0x524a/onvif-mcp/internal/mcperr"
 	"github.com/0x524a/onvif-mcp/internal/redact"
 	"github.com/0x524a/onvif-mcp/internal/registry"
+	"github.com/0x524a/onvif-mcp/internal/tools"
 )
 
 // version is the server's reported version.
@@ -19,8 +20,6 @@ const version = "v0.1.0"
 
 // Version returns the server version reported during initialisation.
 func Version() string { return version }
-
-func boolPtr(b bool) *bool { return &b }
 
 // ListIn is the input for camera.list.
 type ListIn struct {
@@ -65,16 +64,6 @@ type options struct{ base context.Context }
 // without this a SIGTERM during a slow camera probe waits out the probe.
 func WithBaseContext(base context.Context) Option {
 	return func(o *options) { o.base = base }
-}
-
-// withBase returns a context cancelled when either ctx or base is done.
-func withBase(ctx, base context.Context) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(ctx)
-	if base == nil {
-		return ctx, cancel
-	}
-	stop := context.AfterFunc(base, cancel)
-	return ctx, func() { stop(); cancel() }
 }
 
 const argHint = "Pass a JSON object containing only the fields declared in the tool's inputSchema, with the declared types."
@@ -127,6 +116,7 @@ func New(reg *registry.Registry, log *slog.Logger, opts ...Option) *mcp.Server {
 		Version: version,
 	}, nil)
 	srv.AddReceivingMiddleware(argumentErrors)
+	deps := tools.Deps{Reg: reg, Log: log, Base: o.base}
 
 	// Always the generic free function mcp.AddTool, never the srv.AddTool
 	// method: the method skips input validation and turns handler errors into
@@ -140,21 +130,13 @@ func New(reg *registry.Registry, log *slog.Logger, opts ...Option) *mcp.Server {
 			"contacted and state, error and error_code are absent. A dead camera never fails the call: it is " +
 			"reported in its own entry. probe has a built-in time budget, so a hung camera cannot stall it. " +
 			"The result is under data.cameras; error is set only if the call itself failed.",
-		Annotations: &mcp.ToolAnnotations{
-			Title:           "List cameras",
-			ReadOnlyHint:    true,
-			DestructiveHint: boolPtr(false),
-			IdempotentHint:  true,
-			// MCP defines openWorldHint as "may interact with an open world of
-			// external entities". With probe=true this tool does contact
-			// cameras, but only the fixed set an operator wrote into the
-			// config; it never reaches an entity the operator did not name.
-			// That is a closed world, so false. Only discovery, which reaches
-			// whatever answers on the network, is open-world.
-			OpenWorldHint: boolPtr(false),
-		},
+		// Closed world: with probe=true this tool does contact cameras, but
+		// only the fixed set an operator wrote into the config. Only
+		// discovery, which reaches whatever answers on the network, is
+		// open-world.
+		Annotations: tools.ReadOnly("List cameras"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ListIn) (*mcp.CallToolResult, mcperr.Out[ListData], error) {
-		ctx, cancel := withBase(ctx, o.base)
+		ctx, cancel := deps.Scope(ctx)
 		defer cancel()
 		var cams []registry.Status
 		if in.Probe {
@@ -179,6 +161,9 @@ func New(reg *registry.Registry, log *slog.Logger, opts ...Option) *mcp.Server {
 		return res, mcperr.OK(ListData{Cameras: cams}), nil
 	})
 
-	log.Debug("tools registered", "count", 1)
+	tools.RegisterMedia(srv, deps)
+	tools.RegisterImaging(srv, deps)
+
+	log.Debug("tools registered", "count", 4)
 	return srv
 }

@@ -1,0 +1,137 @@
+// Package tools implements the MCP tool surface over the camera registry.
+//
+// Every tool returns the mcperr.Out envelope as its structured result and a
+// short, secret-free text summary as its content. The structured result
+// carries the data; the text is for a human skimming a transcript.
+package tools
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+
+	onvif "github.com/0x524a/onvif-go"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/0x524a/onvif-mcp/internal/mcperr"
+	"github.com/0x524a/onvif-mcp/internal/redact"
+	"github.com/0x524a/onvif-mcp/internal/registry"
+)
+
+// maxTextChars bounds every text summary.
+const maxTextChars = 600
+
+// Deps is what every tool needs.
+type Deps struct {
+	Reg *registry.Registry
+	Log *slog.Logger
+	// Base, when set, also cancels every tool call once it is done (shutdown).
+	// The SDK derives handler contexts from the request, not from the Run
+	// context, so without it a SIGTERM waits out a slow camera call.
+	Base context.Context
+}
+
+// Scope returns a context cancelled when either ctx or d.Base is done.
+func (d Deps) Scope(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	if d.Base == nil {
+		return ctx, cancel
+	}
+	stop := context.AfterFunc(d.Base, cancel)
+	return ctx, func() { stop(); cancel() }
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// ReadOnly builds annotations for a tool that cannot change device state and
+// only talks to cameras an operator configured. All four hints are explicit
+// because two of them are pointers the protocol reads as true when absent.
+func ReadOnly(title string) *mcp.ToolAnnotations {
+	return &mcp.ToolAnnotations{
+		Title:           title,
+		ReadOnlyHint:    true,
+		DestructiveHint: boolPtr(false),
+		IdempotentHint:  true,
+		OpenWorldHint:   boolPtr(false),
+	}
+}
+
+// text builds a successful result carrying only a short text summary. The SDK
+// still fills StructuredContent from the Out value; supplying Content stops it
+// from dumping the whole JSON into the text as well.
+func text(s string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: clip(redact.Scrub(s))}}}
+}
+
+func clip(s string) string {
+	if len(s) <= maxTextChars {
+		return s
+	}
+	cut := maxTextChars
+	for cut > 0 && s[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return s[:cut] + "..."
+}
+
+// fail builds the error triple for a handler: IsError set, the envelope in
+// structured content, and a one-line text. te is already scrubbed by mcperr.
+func fail[T any](te *mcperr.ToolError) (*mcp.CallToolResult, mcperr.Out[T], error) {
+	line := fmt.Sprintf("%s: %s", te.Code, te.Message)
+	if te.Hint != "" {
+		line += " (" + te.Hint + ")"
+	}
+	res := text(line)
+	res.IsError = true
+	return res, mcperr.Fail[T](te), nil
+}
+
+// client resolves a camera ID to an initialised client, translating both an
+// unknown ID and a failed initialisation into the taxonomy.
+func (d Deps) client(ctx context.Context, camera, op string) (*onvif.Client, *mcperr.ToolError) {
+	e, err := d.Reg.Get(camera)
+	if err != nil {
+		if errors.Is(err, registry.ErrUnknownCamera) {
+			return nil, &mcperr.ToolError{
+				Code:      mcperr.CodeNotFound,
+				Camera:    camera,
+				Operation: op,
+				Message:   "no camera with that id is configured",
+				Hint:      "call camera.list to see the configured camera ids",
+			}
+		}
+		return nil, mcperr.FromError(err, camera, op)
+	}
+	c, err := e.Client(ctx)
+	if err != nil {
+		return nil, mcperr.FromError(err, camera, op)
+	}
+	return c, nil
+}
+
+// withHint replaces the generic not_found hint with one that names the tool
+// that lists valid values.
+func withHint(te *mcperr.ToolError, hint string) *mcperr.ToolError {
+	if te != nil && te.Code == mcperr.CodeNotFound {
+		te.Hint = hint
+	}
+	return te
+}
+
+// CameraIn is the input shape shared by tools that address one camera.
+type CameraIn struct {
+	Camera string `json:"camera" jsonschema:"the camera id from camera.list"`
+}
+
+// ProfileIn addresses one media profile on one camera.
+type ProfileIn struct {
+	Camera  string `json:"camera" jsonschema:"the camera id from camera.list"`
+	Profile string `json:"profile" jsonschema:"the profile token from media.profiles"`
+}
+
+// SourceIn addresses one video source.
+type SourceIn struct {
+	Camera      string `json:"camera" jsonschema:"the camera id from camera.list"`
+	SourceToken string `json:"source_token" jsonschema:"the video_source_token from media.profiles"`
+}
