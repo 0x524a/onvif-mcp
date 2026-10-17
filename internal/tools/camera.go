@@ -61,7 +61,13 @@ type Discoverer func(ctx context.Context, timeout time.Duration) ([]*discovery.D
 //
 // onvif-go: discovery.DiscoverWithOptions, discovery/discovery.go.
 func DefaultDiscoverer(ctx context.Context, timeout time.Duration) ([]*discovery.Device, error) {
-	return discovery.DiscoverWithOptions(ctx, timeout, &discovery.DiscoverOptions{ProbeAddress: wsDiscoveryGroup})
+	return discovery.DiscoverWithOptions(ctx, timeout, discoverOptions())
+}
+
+// discoverOptions is the probe configuration DefaultDiscoverer uses. It is a
+// function so a test can pin it without sending a packet.
+func discoverOptions() *discovery.DiscoverOptions {
+	return &discovery.DiscoverOptions{ProbeAddress: wsDiscoveryGroup}
 }
 
 // DiscoverIn controls a discovery probe. There is deliberately no credential

@@ -103,37 +103,55 @@ func TestSchemaInferenceHandlesGenericOutEnvelope(t *testing.T) {
 	}
 }
 
-func TestReadToolsCarryAllFourAnnotations(t *testing.T) {
+// Every registered tool is pinned exactly: the set of names, and all four
+// annotation hints. Two of the hints are pointers the protocol reads as true
+// when absent, so each must be present, and only camera.discover, which reaches
+// whatever answers on the network, is open-world.
+func TestEveryToolCarriesExactAnnotations(t *testing.T) {
 	srv, _ := newTestServer(t, false)
 	cs := connect(t, srv)
 	res, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Tools) == 0 {
-		t.Fatal("tools/list returned no tools; the annotation checks below would pass vacuously")
+	wantOpen := map[string]bool{
+		"camera.list": false, "camera.discover": true, "camera.describe": false,
+		"media.profiles": false, "media.stream_uri": false,
+		"ptz.status": false, "ptz.presets": false, "imaging.settings": false,
+	}
+	if len(res.Tools) != len(wantOpen) {
+		t.Errorf("registered %d tools, want %d", len(res.Tools), len(wantOpen))
 	}
 	for _, tool := range res.Tools {
+		open, known := wantOpen[tool.Name]
+		if !known {
+			t.Errorf("unexpected tool %q", tool.Name)
+			continue
+		}
+		delete(wantOpen, tool.Name)
 		a := tool.Annotations
 		if a == nil {
 			t.Errorf("%s has no annotations", tool.Name)
 			continue
 		}
-		if a.Title == "" {
+		if strings.TrimSpace(a.Title) == "" {
 			t.Errorf("%s: Title must be set", tool.Name)
 		}
 		if !a.ReadOnlyHint {
-			continue // write-tool annotation rules are asserted in Phase 8
+			t.Errorf("%s: ReadOnlyHint must be true", tool.Name)
+		}
+		if a.DestructiveHint == nil || *a.DestructiveHint {
+			t.Errorf("%s: DestructiveHint must be explicitly false, got %v", tool.Name, a.DestructiveHint)
 		}
 		if !a.IdempotentHint {
-			t.Errorf("%s: a read-only tool must be marked idempotent", tool.Name)
+			t.Errorf("%s: IdempotentHint must be true", tool.Name)
 		}
-		if a.DestructiveHint == nil {
-			t.Errorf("%s: DestructiveHint must be set explicitly, not left nil", tool.Name)
+		if a.OpenWorldHint == nil || *a.OpenWorldHint != open {
+			t.Errorf("%s: OpenWorldHint must be explicitly %v, got %v", tool.Name, open, a.OpenWorldHint)
 		}
-		if a.OpenWorldHint == nil {
-			t.Errorf("%s: OpenWorldHint must be set explicitly, not left nil", tool.Name)
-		}
+	}
+	for missing := range wantOpen {
+		t.Errorf("tool %q is not registered", missing)
 	}
 }
 

@@ -178,6 +178,7 @@ func faultFixture(t *testing.T, reason string) *httptest.Server {
 		w.Header().Set("Content-Type", "application/soap+xml")
 		if strings.Contains(string(raw), "GetCapabilities") {
 			_, _ = fmt.Fprintf(w, envelope, `<tds:GetCapabilitiesResponse xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><tds:Capabilities>`+
+				`<tt:PTZ xmlns:tt="http://www.onvif.org/ver10/schema"><tt:XAddr>`+url+`/ptz</tt:XAddr></tt:PTZ>`+
 				`<tt:Media xmlns:tt="http://www.onvif.org/ver10/schema"><tt:XAddr>`+url+`/media</tt:XAddr></tt:Media>`+
 				`<tt:Imaging xmlns:tt="http://www.onvif.org/ver10/schema"><tt:XAddr>`+url+`/imaging</tt:XAddr></tt:Imaging>`+
 				`</tds:Capabilities></tds:GetCapabilitiesResponse>`)
