@@ -42,10 +42,17 @@ func connectTo(t *testing.T, srv *mcp.Server) *mcp.ClientSession {
 // harnessWith registers the read tools over a registry built from cams.
 func harnessWith(t *testing.T, cams map[string]*config.Camera) *mcp.ClientSession {
 	t.Helper()
-	d := Deps{Reg: registry.New(&config.Config{Cameras: cams}), Log: quietLog()}
+	return harnessDeps(t, Deps{Reg: registry.New(&config.Config{Cameras: cams}), Log: quietLog()})
+}
+
+// harnessDeps registers every read tool over d.
+func harnessDeps(t *testing.T, d Deps) *mcp.ClientSession {
+	t.Helper()
 	srv := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
 	RegisterMedia(srv, d)
 	RegisterImaging(srv, d)
+	RegisterPTZReads(srv, d)
+	RegisterCamera(srv, d)
 	return connectTo(t, srv)
 }
 
@@ -120,13 +127,23 @@ const envelope = `<?xml version="1.0"?><s:Envelope xmlns:s="http://www.w3.org/20
 // bodies, keyed by the operation name found in the request.
 func fixture(t *testing.T, bodies map[string]string) *httptest.Server {
 	t.Helper()
+	return fixtureWith(t, bodies, false)
+}
+
+// fixtureWith is fixture, optionally advertising a PTZ service at its own URL.
+func fixtureWith(t *testing.T, bodies map[string]string, ptz bool) *httptest.Server {
+	t.Helper()
 	var url string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		req := string(raw)
 		w.Header().Set("Content-Type", "application/soap+xml")
 		if strings.Contains(req, "GetCapabilities") {
-			_, _ = fmt.Fprintf(w, envelope, `<tds:GetCapabilitiesResponse xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><tds:Capabilities>`+
+			ptzXML := ""
+			if ptz {
+				ptzXML = `<tt:PTZ xmlns:tt="http://www.onvif.org/ver10/schema"><tt:XAddr>` + url + `/ptz</tt:XAddr></tt:PTZ>`
+			}
+			_, _ = fmt.Fprintf(w, envelope, `<tds:GetCapabilitiesResponse xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><tds:Capabilities>`+ptzXML+
 				`<tt:Media xmlns:tt="http://www.onvif.org/ver10/schema"><tt:XAddr>`+url+`/media</tt:XAddr></tt:Media>`+
 				`<tt:Imaging xmlns:tt="http://www.onvif.org/ver10/schema"><tt:XAddr>`+url+`/imaging</tt:XAddr></tt:Imaging>`+
 				`</tds:Capabilities></tds:GetCapabilitiesResponse>`)

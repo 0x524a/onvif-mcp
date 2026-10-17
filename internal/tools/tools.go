@@ -30,6 +30,9 @@ type Deps struct {
 	// The SDK derives handler contexts from the request, not from the Run
 	// context, so without it a SIGTERM waits out a slow camera call.
 	Base context.Context
+	// Discover performs the WS-Discovery probe for camera.discover. Nil means
+	// DefaultDiscoverer. It is injectable so tests never touch the network.
+	Discover Discoverer
 }
 
 // Scope returns a context cancelled when either ctx or d.Base is done.

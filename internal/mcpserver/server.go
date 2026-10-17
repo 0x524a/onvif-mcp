@@ -163,7 +163,9 @@ func New(reg *registry.Registry, log *slog.Logger, opts ...Option) *mcp.Server {
 
 	tools.RegisterMedia(srv, deps)
 	tools.RegisterImaging(srv, deps)
+	tools.RegisterPTZReads(srv, deps)
+	tools.RegisterCamera(srv, deps)
 
-	log.Debug("tools registered", "count", 4)
+	log.Debug("tools registered", "count", 8)
 	return srv
 }
