@@ -1,92 +1,89 @@
 // Package testcam runs onvif-go's virtual camera as an in-process test fixture.
 //
-// It exists to work around upstream onvif-go issue #63: at the pinned version
-// (v1.1.4) server.Start binds a fixed port with no ephemeral option, blocks
-// with no readiness signal, and prints banners to stdout. Once that issue is
-// resolved this package should shrink to a thin wrapper.
-//
-// Stdout noise: v1.1.4 writes its startup and shutdown banners with fmt.Printf
-// straight to os.Stdout and offers no way to redirect them. This package does
-// not swap os.Stdout (that would race across parallel tests). The noise is
-// harmless in tests; the MCP JSON-RPC channel on stdout exists only in the real
-// binary, which never imports this package.
+// It targets onvif-go v1.2.0 (upstream issue #63 resolved there): the harness
+// binds port 0, waits on server.Config.Ready, reads the bound address back from
+// server.Server.Addr, and sends the startup banner to io.Discard through
+// server.Config.Output. No port is ever pre-picked, so there is no race with
+// other listeners and no retry loop.
 package testcam
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
+	"io"
 	"sync"
 	"testing"
 	"time"
 
+	onvif "github.com/0x524a/onvif-go"
 	"github.com/0x524a/onvif-go/server"
 )
 
 const (
-	bindAttempts    = 5
-	readyTimeout    = 3 * time.Second
+	readyTimeout    = 5 * time.Second
 	shutdownTimeout = 10 * time.Second
+	settleTimeout   = 10 * time.Second
+	pollInterval    = 20 * time.Millisecond
+
+	// movablePresetToken is appended only when the default config has no
+	// usable preset.
+	movablePresetToken = "testcam_preset"
 )
 
-// Cam is a running virtual camera bound to a free port.
+// Cam is a running virtual camera bound to an OS-assigned port.
 type Cam struct {
-	srv          *server.Server
-	cfg          *server.Config
-	addr         string
-	profileToken string
-	presetToken  string
+	srv         *server.Server
+	cfg         *server.Config
+	addr        string
+	profile     string
+	videoSource string
+	preset      string
 
 	cancel   context.CancelFunc
 	done     chan error
 	stopOnce sync.Once
 	stopErr  error
+
+	clientOnce sync.Once
+	client     *onvif.Client
+	clientErr  error
 }
 
-// Start boots a virtual camera and registers cleanup with t. A bind failure
-// (the port freed by freePort being taken before the server binds it) is
-// retried with a new port up to five times.
+// Start boots a virtual camera and registers cleanup with t.
 func Start(t *testing.T) *Cam {
 	t.Helper()
-
-	var lastErr error
-	for attempt := 1; attempt <= bindAttempts; attempt++ {
-		cam, err := tryStart()
-		if err == nil {
-			t.Cleanup(func() {
-				if err := cam.Stop(); err != nil {
-					t.Errorf("testcam cleanup: %v", err)
-				}
-			})
-			return cam
-		}
-		lastErr = err
-		t.Logf("testcam: start attempt %d/%d failed: %v", attempt, bindAttempts, err)
+	cam, err := start()
+	if err != nil {
+		t.Fatalf("testcam: %v", err)
 	}
-	t.Fatalf("testcam: virtual camera failed to start after %d attempts: %v", bindAttempts, lastErr)
-	return nil
+	t.Cleanup(func() {
+		if err := cam.Stop(); err != nil {
+			t.Errorf("testcam cleanup: %v", err)
+		}
+	})
+	return cam
 }
 
-func tryStart() (*Cam, error) {
-	port, err := freePort()
-	if err != nil {
-		return nil, fmt.Errorf("freePort: %w", err)
-	}
+func start() (*Cam, error) {
+	ready := make(chan struct{})
 
 	cfg := server.DefaultConfig()
 	cfg.Host = "127.0.0.1"
-	cfg.Port = port
+	cfg.Port = 0 // OS-assigned; the real address is read back via Server.Addr
 	cfg.Username = "operator"
-	cfg.Password = "testpass"
+	cfg.Password = randomPassword()
 	cfg.SupportPTZ = true
 	cfg.SupportImaging = true
+	cfg.Output = io.Discard
+	cfg.Ready = ready
 
 	if len(cfg.Profiles) == 0 {
 		return nil, errors.New("DefaultConfig returned no profiles; adjust the harness")
 	}
-	// Guarantee the first profile is PTZ-capable and has a preset, so later
-	// phases have a bounded target to move to.
+	// Guarantee the first profile is PTZ-capable.
 	p := &cfg.Profiles[0]
 	if p.PTZ == nil {
 		p.PTZ = &server.PTZConfig{
@@ -99,9 +96,7 @@ func tryStart() (*Cam, error) {
 			SupportsRelative:   true,
 		}
 	}
-	if len(p.PTZ.Presets) == 0 {
-		p.PTZ.Presets = []server.Preset{{Token: "preset1", Name: "Preset 1"}}
-	}
+	preset := pickMovablePreset(p.PTZ)
 
 	srv, err := server.New(cfg)
 	if err != nil {
@@ -114,48 +109,55 @@ func tryStart() (*Cam, error) {
 
 	cam := &Cam{
 		srv: srv, cfg: cfg,
-		addr:         fmt.Sprintf("127.0.0.1:%d", port),
-		profileToken: p.Token,
-		presetToken:  p.PTZ.Presets[0].Token,
-		cancel:       cancel,
-		done:         done,
+		profile:     p.Token,
+		videoSource: p.VideoSource.Token,
+		preset:      preset,
+		cancel:      cancel,
+		done:        done,
 	}
 
-	if err := cam.waitReady(readyTimeout); err != nil {
-		// Start may have returned already (bind failure); Stop drains it.
+	select {
+	case <-ready:
+	case err := <-done:
+		cancel()
+		return nil, fmt.Errorf("server exited before becoming ready: %w", err)
+	case <-time.After(readyTimeout):
 		_ = cam.Stop()
-		return nil, err
+		return nil, fmt.Errorf("server not ready within %v", readyTimeout)
+	}
+	cam.addr = srv.Addr()
+	if cam.addr == "" {
+		_ = cam.Stop()
+		return nil, errors.New("server signalled ready but reported no address")
 	}
 	return cam, nil
 }
 
-// waitReady polls until the address accepts connections, failing early if the
-// server goroutine exits (for example "address already in use").
-func (c *Cam) waitReady(within time.Duration) error {
-	deadline := time.Now().Add(within)
-	for time.Now().Before(deadline) {
-		select {
-		case err := <-c.done:
-			c.done <- err // keep it for Stop
-			return fmt.Errorf("server exited before becoming ready: %w", err)
-		default:
-		}
-		conn, err := net.DialTimeout("tcp", c.addr, 200*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			// A foreign listener could answer the dial while our server
-			// failed to bind; make sure Start has not already returned.
-			select {
-			case err := <-c.done:
-				c.done <- err
-				return fmt.Errorf("server exited before becoming ready: %w", err)
-			case <-time.After(30 * time.Millisecond):
-			}
-			return nil
-		}
-		time.Sleep(20 * time.Millisecond)
+// randomPassword gives every camera a distinct credential so a test can tell
+// "this camera" from an unrelated process that was handed the same ephemeral
+// port after this camera released it.
+func randomPassword() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("testcam: crypto/rand: %v", err))
 	}
-	return fmt.Errorf("no listener on %s after %v", c.addr, within)
+	return "pw-" + hex.EncodeToString(b)
+}
+
+// pickMovablePreset returns the token of a preset whose position differs from
+// the initial (zero) PTZ position, appending one if none exists.
+func pickMovablePreset(ptz *server.PTZConfig) string {
+	for _, pr := range ptz.Presets {
+		if pr.Position != (server.PTZPosition{}) {
+			return pr.Token
+		}
+	}
+	ptz.Presets = append(ptz.Presets, server.Preset{
+		Token:    movablePresetToken,
+		Name:     "Testcam Movable",
+		Position: server.PTZPosition{Pan: 10, Tilt: 5, Zoom: 0.5},
+	})
+	return movablePresetToken
 }
 
 // Stop shuts the camera down and waits for the server goroutine to return. It
@@ -187,22 +189,71 @@ func (c *Cam) Username() string { return c.cfg.Username }
 func (c *Cam) Password() string { return c.cfg.Password }
 
 // ProfileToken returns the first profile's token (PTZ-capable).
-func (c *Cam) ProfileToken() string { return c.profileToken }
+func (c *Cam) ProfileToken() string { return c.profile }
 
-// PresetToken returns a preset that exists on the first profile.
-func (c *Cam) PresetToken() string { return c.presetToken }
+// VideoSourceToken returns the first profile's video source token, as used by
+// imaging calls.
+func (c *Cam) VideoSourceToken() string { return c.videoSource }
+
+// PresetToken returns a preset on the first profile whose position differs
+// from the initial PTZ position, so GotoPreset observably moves the camera.
+func (c *Cam) PresetToken() string { return c.preset }
 
 // Server returns the underlying virtual camera.
+//
+// Caution: methods such as GetPTZState return pointers into live state that
+// the server's settle timer mutates after a move, so reading those fields
+// directly races. Use PTZPosition for a race-free read.
 func (c *Cam) Server() *server.Server { return c.srv }
 
-// freePort asks the kernel for an unused port, then releases it. There is a
-// small race between release and the server binding it, which Start covers by
-// retrying; unavoidable until issue #63 allows Port 0 with address read-back.
-func freePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+// PTZPosition returns the first profile's PTZ position once any move has
+// settled. It reads over the wire (PTZ GetStatus), which the server serves
+// under its own lock, so it never touches live state and is safe under -race.
+// It panics if the camera cannot be queried or does not settle in time (a
+// harness failure, not a product condition).
+func (c *Cam) PTZPosition() server.PTZPosition {
+	pos, err := c.ptzPosition()
 	if err != nil {
-		return 0, err
+		panic(fmt.Sprintf("testcam: PTZPosition: %v", err))
 	}
-	defer func() { _ = l.Close() }()
-	return l.Addr().(*net.TCPAddr).Port, nil
+	return pos
+}
+
+func (c *Cam) ptzPosition() (server.PTZPosition, error) {
+	c.clientOnce.Do(func() {
+		cl, err := onvif.NewClient(c.Endpoint(), onvif.WithCredentials(c.Username(), c.Password()))
+		if err == nil {
+			err = cl.Initialize(context.Background())
+		}
+		c.client, c.clientErr = cl, err
+	})
+	if c.clientErr != nil {
+		return server.PTZPosition{}, c.clientErr
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), settleTimeout)
+	defer cancel()
+	for {
+		st, err := c.client.GetStatus(ctx, c.profile)
+		if err != nil {
+			return server.PTZPosition{}, err
+		}
+		if st.MoveStatus == nil || (st.MoveStatus.PanTilt != "MOVING" && st.MoveStatus.Zoom != "MOVING") {
+			var pos server.PTZPosition
+			if st.Position != nil {
+				if st.Position.PanTilt != nil {
+					pos.Pan, pos.Tilt = st.Position.PanTilt.X, st.Position.PanTilt.Y
+				}
+				if st.Position.Zoom != nil {
+					pos.Zoom = st.Position.Zoom.X
+				}
+			}
+			return pos, nil
+		}
+		select {
+		case <-ctx.Done():
+			return server.PTZPosition{}, fmt.Errorf("PTZ still moving after %v", settleTimeout)
+		case <-time.After(pollInterval):
+		}
+	}
 }
