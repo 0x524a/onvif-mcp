@@ -150,7 +150,7 @@ func classifyTransport(err error) (verdict, bool) {
 	var ne net.Error
 	if (errors.As(err, &ne) && ne.Timeout()) || strings.Contains(l, "i/o timeout") ||
 		strings.Contains(l, "timed out") || strings.Contains(l, "tls handshake timeout") {
-		return verdict{CodeTimeout, "the camera did not answer in time; retry, or raise its configured timeout"}, true
+		return verdict{CodeTimeout, "the camera did not answer in time; retry, or ask the operator to raise timeout_seconds for this camera in the config"}, true
 	}
 	var oe *net.OpError
 	var de *net.DNSError
@@ -171,6 +171,53 @@ func classifyTransport(err error) (verdict, bool) {
 		return verdict{CodeUnreachable, "the connection closed before the camera answered; check power, the configured port and scheme"}, true
 	}
 	return verdict{}, false
+}
+
+// rootCause returns the text of err with the library's wrapper stack removed.
+// It descends through single-%w layers while a layer's text is its own prefix
+// plus the next layer's text ("failed to send HTTP request: <next>"), which is
+// pure wrapping. It stops at a layer that adds something the next one lacks
+// (an HTTP status line over a sentinel) and at joined errors, so information
+// is never dropped, only repeated context. Both texts are compared scrubbed,
+// because a registry wrapper already holds scrubbed text.
+func rootCause(err error) string {
+	cur := err
+	for {
+		u, ok := cur.(interface{ Unwrap() error })
+		if !ok {
+			break
+		}
+		next := u.Unwrap()
+		if next == nil {
+			break
+		}
+		if !isPrefixWrapper(cur, next) {
+			break
+		}
+		cur = next
+	}
+	return cur.Error()
+}
+
+// isPrefixWrapper reports whether outer's text is some prefix plus inner's. An
+// inner error whose Error method panics (a zero-valued x509 error does) ends the
+// descent rather than the call.
+func isPrefixWrapper(outer, inner error) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	return strings.HasSuffix(redact.Scrub(outer.Error()), redact.Scrub(inner.Error()))
+}
+
+// withOperation prefixes a message with the failed operation, so the line reads
+// "GetProfiles failed: <root cause>".
+func withOperation(operation, msg string) string {
+	if operation == "" {
+		return msg
+	}
+	return operation + " failed: " + msg
 }
 
 // FromError maps an onvif-go error onto the taxonomy.
@@ -223,10 +270,11 @@ func fromError(err error, camera, operation string) *ToolError {
 	if err == nil {
 		return nil
 	}
+	root := rootCause(err)
 	te := &ToolError{
 		Camera:    camera,
 		Operation: operation,
-		Message:   redact.Scrub(cutBody(err.Error())),
+		Message:   withOperation(operation, redact.Scrub(cutBody(root))),
 	}
 
 	var oe *onvif.ONVIFError
@@ -257,7 +305,7 @@ func fromError(err error, camera, operation string) *ToolError {
 		te.Hint = "the request was refused; if this camera is NATed or multi-homed, the operator can set trust_advertised_hosts for it in the config"
 	case errors.Is(err, onvif.ErrTimeout), errors.Is(err, context.DeadlineExceeded):
 		te.Code = CodeTimeout
-		te.Hint = "the camera did not answer in time; retry, or raise its configured timeout"
+		te.Hint = "the camera did not answer in time; retry, or ask the operator to raise timeout_seconds for this camera in the config"
 	case errors.Is(err, context.Canceled):
 		te.Code = CodeInternal
 		te.Hint = hintCancelled
@@ -285,7 +333,10 @@ func fromError(err error, camera, operation string) *ToolError {
 	default:
 		if f, prefix, ok := parseSOAPFault(err.Error()); ok {
 			te.SOAP = &SOAPFault{Code: f.Code, Reason: f.Reason}
-			te.Message = redact.Scrub(prefix + "SOAP fault: [" + f.Code + "] " + f.Reason)
+			if _, p, ok := parseSOAPFault(root); ok {
+				prefix = p
+			}
+			te.Message = withOperation(operation, redact.Scrub(prefix+"SOAP fault: ["+f.Code+"] "+f.Reason))
 			switch {
 			case httpStatus(prefix) == 401 || httpStatus(prefix) == 403 || isAuthText(f.Code+" "+f.Reason):
 				te.Code = CodeAuthFailed
