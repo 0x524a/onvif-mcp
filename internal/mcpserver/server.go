@@ -118,10 +118,10 @@ func New(reg *registry.Registry, log *slog.Logger, opts ...Option) *mcp.Server {
 	srv.AddReceivingMiddleware(argumentErrors)
 	deps := tools.Deps{Reg: reg, Log: log, Base: o.base}
 
-	// Always the generic free function mcp.AddTool, never the srv.AddTool
+	// Always tools.Add (which wraps the generic free function), never the srv.AddTool
 	// method: the method skips input validation and turns handler errors into
 	// protocol errors instead of tool errors (go-sdk v1.7.0 server.go).
-	mcp.AddTool(srv, &mcp.Tool{
+	tools.Add(srv, &mcp.Tool{
 		Name: "camera.list",
 		Description: "List the cameras this server is configured with. Each entry has: id (the handle to use for " +
 			"other tools); endpoint (the camera's URL, credentials never included); control_allowed (whether " +

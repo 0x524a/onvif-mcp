@@ -69,7 +69,7 @@ type Candidate struct {
 	EndpointRef   string   `json:"endpoint_ref,omitempty"`
 	XAddrs        []string `json:"xaddrs"`
 	Scopes        []string `json:"scopes,omitempty"`
-	ConfigSnippet string   `json:"config_snippet"`
+	ConfigSnippet string   `json:"config_snippet" sanitize:"noclip"`
 }
 
 // DiscoverData is the camera.discover result.
@@ -173,7 +173,7 @@ func candidatesFrom(devs []*discovery.Device) ([]Candidate, int) {
 // RegisterCamera registers camera.describe and camera.discover.
 func RegisterCamera(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetDeviceInformation and (*Client).GetServices, device.go.
-	mcp.AddTool(srv, &mcp.Tool{
+	Add(srv, &mcp.Tool{
 		Name: "camera.describe",
 		Description: "Read a camera's identity (manufacturer, model, firmware, serial) and the services it " +
 			"advertises in advertised_services. Advertised services are the camera's claims, not verified " +
@@ -233,7 +233,7 @@ func RegisterCamera(srv *mcp.Server, d Deps) {
 	})
 
 	// onvif-go: discovery.DiscoverWithOptions, discovery/discovery.go.
-	mcp.AddTool(srv, &mcp.Tool{
+	Add(srv, &mcp.Tool{
 		Name: "camera.discover",
 		Description: "Probe the local network (WS-Discovery) for ONVIF devices for timeout_seconds (default 3, " +
 			"maximum 10). Results are candidates only: they have no camera id and no credentials, are never " +

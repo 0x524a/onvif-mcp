@@ -27,7 +27,7 @@ type Limits struct {
 }
 
 func rangeOf(r *onvif.FloatRange) *Range {
-	if r == nil {
+	if r == nil || !finite(r.Min) || !finite(r.Max) {
 		return nil
 	}
 	return &Range{Min: r.Min, Max: r.Max}
@@ -63,16 +63,22 @@ func findProfile(ps []*onvif.Profile, token string) *onvif.Profile {
 	return nil
 }
 
-// positionOf copies a PTZ vector, leaving unreported axes nil.
+// positionOf copies a PTZ vector, leaving unreported axes nil. A non-finite
+// axis is treated as not reported: JSON cannot carry NaN or infinity.
 func positionOf(v *onvif.PTZVector) (pan, tilt, zoom *float64) {
 	if v == nil {
 		return nil, nil, nil
 	}
 	if pt := v.PanTilt; pt != nil {
 		x, y := pt.X, pt.Y
-		pan, tilt = &x, &y
+		if finite(x) {
+			pan = &x
+		}
+		if finite(y) {
+			tilt = &y
+		}
 	}
-	if z := v.Zoom; z != nil {
+	if z := v.Zoom; z != nil && finite(z.X) {
 		x := z.X
 		zoom = &x
 	}
@@ -122,7 +128,7 @@ type StatusData struct {
 // RegisterPTZReads registers ptz.status and ptz.presets.
 func RegisterPTZReads(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetStatus, ptz.go.
-	mcp.AddTool(srv, &mcp.Tool{
+	Add(srv, &mcp.Tool{
 		Name: "ptz.status",
 		Description: "Read a profile's current PTZ position and movement state. An absent pan, tilt or zoom " +
 			"was not reported by the camera. Fails with not_supported if the camera has no PTZ service.",
@@ -155,7 +161,7 @@ func RegisterPTZReads(srv *mcp.Server, d Deps) {
 	})
 
 	// onvif-go: (*Client).GetPresets and (*Client).GetConfiguration, ptz.go; (*Client).GetProfiles, media.go.
-	mcp.AddTool(srv, &mcp.Tool{
+	Add(srv, &mcp.Tool{
 		Name: "ptz.presets",
 		Description: "List a profile's stored PTZ presets (token, name, and pan/tilt/zoom when the camera " +
 			"reports them) and, when reported, the movement limits in reported_limits. Absent means not " +

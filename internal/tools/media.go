@@ -35,7 +35,7 @@ type ProfilesData struct {
 // StreamURIData is the media.stream_uri result. The URI is redacted; the
 // server holds the credentials needed to play it.
 type StreamURIData struct {
-	URI                 string `json:"uri"`
+	URI                 string `json:"uri" sanitize:"noclip"`
 	CredentialsRequired bool   `json:"credentials_required"`
 	InvalidAfterConnect bool   `json:"invalid_after_connect"`
 	InvalidAfterReboot  bool   `json:"invalid_after_reboot"`
@@ -67,7 +67,7 @@ func summarizeProfiles(ps []ProfileSummary) string {
 // RegisterMedia registers media.profiles and media.stream_uri.
 func RegisterMedia(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetProfiles, media.go.
-	mcp.AddTool(srv, &mcp.Tool{
+	Add(srv, &mcp.Tool{
 		Name: "media.profiles",
 		Description: "List a camera's media profiles. Each has token (pass it as profile to other tools), " +
 			"has_ptz, and, when the camera reports them, encoding, width, height, framerate and " +
@@ -109,7 +109,7 @@ func RegisterMedia(srv *mcp.Server, d Deps) {
 	})
 
 	// onvif-go: (*Client).GetStreamURI, media.go.
-	mcp.AddTool(srv, &mcp.Tool{
+	Add(srv, &mcp.Tool{
 		Name: "media.stream_uri",
 		Description: "Get the RTSP stream URI for a profile. Credentials are never included, in the URI or " +
 			"anywhere else; they stay server-side and are applied by tools that open the stream.",

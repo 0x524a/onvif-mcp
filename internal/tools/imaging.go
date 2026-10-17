@@ -38,7 +38,7 @@ func summarizeImaging(d ImagingData) string {
 // RegisterImaging registers imaging.settings.
 func RegisterImaging(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetImagingSettings, imaging.go.
-	mcp.AddTool(srv, &mcp.Tool{
+	Add(srv, &mcp.Tool{
 		Name: "imaging.settings",
 		Description: "Read a video source's imaging settings (brightness, color_saturation, contrast, " +
 			"sharpness). An absent field was not reported by the camera. Fails with not_supported if the " +
@@ -58,12 +58,21 @@ func RegisterImaging(srv *mcp.Server, d Deps) {
 		var out ImagingData
 		if s != nil {
 			out = ImagingData{
-				Brightness:      s.Brightness,
-				ColorSaturation: s.ColorSaturation,
-				Contrast:        s.Contrast,
-				Sharpness:       s.Sharpness,
+				Brightness:      finitePtr(s.Brightness),
+				ColorSaturation: finitePtr(s.ColorSaturation),
+				Contrast:        finitePtr(s.Contrast),
+				Sharpness:       finitePtr(s.Sharpness),
 			}
 		}
 		return text(summarizeImaging(out)), mcperr.OK(out), nil
 	})
+}
+
+// finitePtr drops a NaN or infinite value: JSON cannot carry it, and a value
+// that is not a number was not usefully reported.
+func finitePtr(v *float64) *float64 {
+	if v == nil || !finite(*v) {
+		return nil
+	}
+	return v
 }
