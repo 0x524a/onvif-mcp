@@ -1,0 +1,15 @@
+onvif-mcp
+Copyright 2026 0x524a
+
+Licensed under the MIT License; see LICENSE.
+
+This product bundles portions of the following components when distributed
+as a compiled binary:
+
+  github.com/modelcontextprotocol/go-sdk
+    Licensed under the Apache License, Version 2.0, with some contributions
+    remaining under the MIT License during an in-progress relicensing.
+    See https://github.com/modelcontextprotocol/go-sdk/blob/main/LICENSE
+
+  github.com/0x524a/onvif-go        MIT
+  github.com/0x524A/rtspeek         MIT
