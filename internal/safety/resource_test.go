@@ -1,0 +1,145 @@
+package safety
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+type policyBody struct {
+	Mode               string        `json:"mode"`
+	ControlEnabled     bool          `json:"control_enabled"`
+	GatedWriteTools    []string      `json:"gated_write_tools"`
+	Cameras            []CameraGrant `json:"cameras"`
+	RateLimitPerCamera string        `json:"rate_limit_per_camera"`
+	HowToEnable        string        `json:"how_to_enable"`
+	DryRunDefault      bool          `json:"dry_run_default"`
+	Explanation        string        `json:"explanation"`
+}
+
+// readPolicy serves p over an in-memory transport and reads the resource.
+func readPolicy(t *testing.T, p *Policy) (policyBody, string) {
+	t.Helper()
+	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	RegisterPolicyResource(srv, p, func() []CameraGrant {
+		return []CameraGrant{{ID: "cam-a", ControlAllowed: true}}
+	})
+	st, ct := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := srv.Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "0"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	res, err := cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: PolicyURI})
+	if err != nil {
+		t.Fatalf("ReadResource: %v", err)
+	}
+	if len(res.Contents) != 1 {
+		t.Fatalf("contents = %d", len(res.Contents))
+	}
+	var b policyBody
+	if err := json.Unmarshal([]byte(res.Contents[0].Text), &b); err != nil {
+		t.Fatalf("body is not JSON: %v: %s", err, res.Contents[0].Text)
+	}
+	return b, res.Contents[0].Text
+}
+
+func TestPolicyResourceExplainsDisabledControl(t *testing.T) {
+	p, _, _ := newPolicy(false)
+	p.NoteGated("some.write_tool")
+	b, raw := readPolicy(t, p)
+	if b.Mode != "read-only" || b.ControlEnabled {
+		t.Errorf("mode=%q control_enabled=%v", b.Mode, b.ControlEnabled)
+	}
+	if len(b.GatedWriteTools) != 1 || b.GatedWriteTools[0] != "some.write_tool" {
+		t.Errorf("gated tools = %v", b.GatedWriteTools)
+	}
+	if !strings.Contains(b.HowToEnable, "enable-control") {
+		t.Errorf("how_to_enable must name the flag: %q", b.HowToEnable)
+	}
+	if !b.DryRunDefault {
+		t.Error("dry_run_default must be true")
+	}
+	if len(b.Cameras) != 1 || b.Cameras[0].ID != "cam-a" {
+		t.Errorf("cameras = %+v", b.Cameras)
+	}
+	if strings.Contains(raw, "ptz.goto_preset") {
+		t.Errorf("tool names must come from what was registered, not a literal: %s", raw)
+	}
+}
+
+func TestPolicyResourceReflectsEnabledControl(t *testing.T) {
+	p, _, _ := newPolicy(true)
+	b, _ := readPolicy(t, p)
+	if b.Mode != "control-enabled" || !b.ControlEnabled {
+		t.Errorf("mode=%q control_enabled=%v", b.Mode, b.ControlEnabled)
+	}
+}
+
+func TestPolicyResourceGatedListIsSortedDedupedAndNeverNull(t *testing.T) {
+	p, _, _ := newPolicy(false)
+	b, raw := readPolicy(t, p)
+	if len(b.GatedWriteTools) != 0 || !strings.Contains(raw, `"gated_write_tools": []`) {
+		t.Errorf("an empty list must serialise as []: %s", raw)
+	}
+	p.NoteGated("b.tool")
+	p.NoteGated("a.tool")
+	p.NoteGated("b.tool")
+	b, _ = readPolicy(t, p)
+	if len(b.GatedWriteTools) != 2 || b.GatedWriteTools[0] != "a.tool" || b.GatedWriteTools[1] != "b.tool" {
+		t.Errorf("gated tools = %v", b.GatedWriteTools)
+	}
+}
+
+func TestPolicyResourceRateLimitComesFromTheLimiter(t *testing.T) {
+	p, _, _ := newPolicy(true) // interval 1h, burst 1
+	b, _ := readPolicy(t, p)
+	if !strings.Contains(b.RateLimitPerCamera, "1h0m0s") || !strings.Contains(b.RateLimitPerCamera, "burst 1") {
+		t.Errorf("rate limit = %q", b.RateLimitPerCamera)
+	}
+	p.Limiter = NewLimiter(7*time.Second, 4)
+	b, _ = readPolicy(t, p)
+	if !strings.Contains(b.RateLimitPerCamera, "7s") || !strings.Contains(b.RateLimitPerCamera, "burst 4") {
+		t.Errorf("rate limit = %q", b.RateLimitPerCamera)
+	}
+	p.Limiter = nil
+	b, _ = readPolicy(t, p)
+	if !strings.Contains(b.RateLimitPerCamera, "no real movement") {
+		t.Errorf("a missing limiter must be stated: %q", b.RateLimitPerCamera)
+	}
+}
+
+func TestPolicyResourceNilPolicyReportsReadOnly(t *testing.T) {
+	b, _ := readPolicy(t, nil)
+	if b.Mode != "read-only" || b.ControlEnabled {
+		t.Errorf("mode=%q control_enabled=%v", b.Mode, b.ControlEnabled)
+	}
+}
+
+func TestNoteGatedIsNilSafe(t *testing.T) {
+	var p *Policy
+	p.NoteGated("x")
+	if len(p.GatedTools()) != 0 {
+		t.Error("nil policy has no gated tools")
+	}
+}
+
+func TestLimiterReportsItsConfiguration(t *testing.T) {
+	l := NewLimiter(3*time.Second, 5)
+	if l.Interval() != 3*time.Second || l.Burst() != 5 {
+		t.Errorf("interval=%v burst=%d", l.Interval(), l.Burst())
+	}
+	d := NewLimiter(0, 0)
+	if d.Interval() != DefaultInterval || d.Burst() != DefaultBurst {
+		t.Errorf("defaults: interval=%v burst=%d", d.Interval(), d.Burst())
+	}
+}

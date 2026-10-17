@@ -404,7 +404,7 @@ func TestPolicyDoesNotFormatCredentials(t *testing.T) {
 		"cam-a": {ID: "cam-a", Endpoint: "http://192.0.2.1/", Password: "hunter2", Control: true},
 	}})
 	p := NewPolicy(PolicyOptions{ControlEnabled: true, Cameras: reg})
-	if s := fmt.Sprintf("%v %+v", p, *p); strings.Contains(s, "hunter2") {
+	if s := fmt.Sprintf("%v %+v", p, p); strings.Contains(s, "hunter2") {
 		t.Errorf("policy formatting leaks a credential: %s", s)
 	}
 }

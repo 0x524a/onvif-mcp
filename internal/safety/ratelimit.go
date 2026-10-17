@@ -99,6 +99,12 @@ func (l *Limiter) refilled(b *bucket, now time.Time) float64 {
 	return t
 }
 
+// Interval is the refill interval: one token per Interval.
+func (l *Limiter) Interval() time.Duration { return l.interval }
+
+// Burst is the bucket size.
+func (l *Limiter) Burst() int { return int(l.burst) }
+
 // Allow consumes a token for camera. On refusal it reports how long to wait.
 // It is safe for concurrent use.
 func (l *Limiter) Allow(camera string) (bool, time.Duration) {

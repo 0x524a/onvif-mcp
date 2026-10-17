@@ -3,6 +3,8 @@ package safety
 import (
 	"log/slog"
 	"math"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/0x524a/onvif-mcp/internal/mcperr"
@@ -47,6 +49,43 @@ type Policy struct {
 	// which carries JSON-RPC. Nil refuses all real moves: no motion without a
 	// record of it.
 	Log *slog.Logger
+
+	// gated is the set of write tools the guarded registration helper has
+	// been asked to register, whether or not control is enabled. The policy
+	// resource reports it, so the list cannot drift from what exists.
+	gatedMu sync.Mutex
+	gated   map[string]struct{}
+}
+
+// NoteGated records that a write tool exists and is gated by this policy. The
+// guarded registration helper calls it for every write tool, including the
+// ones it then declines to register because control is off, which is what
+// lets the policy resource name a tool an agent cannot see. Nil-safe.
+func (p *Policy) NoteGated(tool string) {
+	if p == nil {
+		return
+	}
+	p.gatedMu.Lock()
+	defer p.gatedMu.Unlock()
+	if p.gated == nil {
+		p.gated = make(map[string]struct{})
+	}
+	p.gated[tool] = struct{}{}
+}
+
+// GatedTools returns the noted write tools, sorted. It never returns nil.
+func (p *Policy) GatedTools() []string {
+	out := []string{}
+	if p == nil {
+		return out
+	}
+	p.gatedMu.Lock()
+	defer p.gatedMu.Unlock()
+	for t := range p.gated {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // PolicyOptions configures NewPolicy.
