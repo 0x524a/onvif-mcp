@@ -116,12 +116,7 @@ type outcome struct {
 }
 
 func (rtspProber) Describe(ctx context.Context, rtspURL string, timeout time.Duration) (*Result, error) {
-	if timeout <= 0 {
-		timeout = defaultTimeout
-	}
-	if timeout > maxTimeout {
-		timeout = maxTimeout
-	}
+	timeout = normaliseTimeout(timeout)
 	secrets := secretsOf(rtspURL)
 
 	u, err := base.ParseURL(rtspURL)
@@ -136,6 +131,7 @@ func (rtspProber) Describe(ctx context.Context, rtspURL string, timeout time.Dur
 	stop := context.AfterFunc(ctx, cancel)
 	defer stop()
 
+	lookup := lookupNetIP // read here: the probe goroutine can outlive this call
 	done := make(chan outcome, 1)
 	go func() {
 		defer func() {
@@ -143,7 +139,7 @@ func (rtspProber) Describe(ctx context.Context, rtspURL string, timeout time.Dur
 				done <- outcome{err: errors.New("stream probe failed internally")}
 			}
 		}()
-		res, err := describe(cctx, u, timeout)
+		res, err := describe(cctx, u, timeout, lookup)
 		done <- outcome{res: res, err: err}
 	}()
 
@@ -162,37 +158,53 @@ func (rtspProber) Describe(ctx context.Context, rtspURL string, timeout time.Dur
 	return Bound(o.res), nil
 }
 
+// normaliseTimeout maps a non-positive timeout to the default and caps the rest.
+func normaliseTimeout(d time.Duration) time.Duration {
+	if d <= 0 {
+		return defaultTimeout
+	}
+	if d > maxTimeout {
+		return maxTimeout
+	}
+	return d
+}
+
+// pinnedDial returns the only dial function the client may use: one
+// connection, to want, made to the already-resolved pinned address, and none
+// once a redirect has been seen.
+func pinnedDial(want, pinned string, redirected *atomic.Bool) func(context.Context, string, string) (net.Conn, error) {
+	var dials atomic.Int32
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		if address != want || redirected.Load() || dials.Add(1) > 1 {
+			return nil, errDialRefused
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, pinned)
+	}
+}
+
 // describe runs the handshake. It owns the client and always closes it, and
 // closes it early when ctx ends, so a cancelled or timed-out probe leaves no
 // connection or goroutine behind.
-func describe(ctx context.Context, u *base.URL, timeout time.Duration) (*Result, error) {
+func describe(ctx context.Context, u *base.URL, timeout time.Duration, lookup lookupFunc) (*Result, error) {
 	start := time.Now()
 	addr := canonicalAddr(u)
 	host, port, _ := net.SplitHostPort(addr)
 
 	// Resolve once. Every dial goes to this IP, so a resolver that answers
 	// differently the second time cannot move the connection.
-	ip, err := resolveOnce(ctx, host)
+	ip, err := resolveOnce(ctx, host, lookup)
 	if err != nil {
 		return nil, fmt.Errorf("connection failed: %w", err)
 	}
 	pinned := net.JoinHostPort(ip, port)
 
 	var redirected atomic.Bool
-	var dials atomic.Int32
 	c := &gortsplib.Client{
 		Scheme:       u.Scheme,
 		Host:         u.Host,
 		ReadTimeout:  timeout,
 		WriteTimeout: timeout,
-		DialContext: func(dctx context.Context, network, address string) (net.Conn, error) {
-			// One connection, to the probed address, and none after a
-			// redirect has been seen.
-			if address != addr || redirected.Load() || dials.Add(1) > 1 {
-				return nil, errDialRefused
-			}
-			return (&net.Dialer{}).DialContext(dctx, network, pinned)
-		},
+		DialContext:  pinnedDial(addr, pinned, &redirected),
 		OnResponse: func(r *base.Response) {
 			if r != nil && r.StatusCode >= 300 && r.StatusCode <= 399 {
 				redirected.Store(true)
@@ -267,14 +279,16 @@ func canonicalAddr(u *base.URL) string {
 
 // lookupNetIP is the resolver; tests replace it to prove the name is resolved
 // once and the connection goes to that answer.
-var lookupNetIP = net.DefaultResolver.LookupNetIP
+type lookupFunc = func(ctx context.Context, network, host string) ([]netip.Addr, error)
+
+var lookupNetIP lookupFunc = net.DefaultResolver.LookupNetIP
 
 // resolveOnce returns host as an IP literal, resolving it once if it is a name.
-func resolveOnce(ctx context.Context, host string) (string, error) {
+func resolveOnce(ctx context.Context, host string, lookup lookupFunc) (string, error) {
 	if a, err := netip.ParseAddr(host); err == nil {
 		return a.String(), nil
 	}
-	addrs, err := lookupNetIP(ctx, "ip", host)
+	addrs, err := lookup(ctx, "ip", host)
 	if err != nil {
 		return "", err
 	}

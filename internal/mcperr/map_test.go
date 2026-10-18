@@ -314,3 +314,10 @@ func TestUnclassifiedNotFoundTextMapsToNotFound(t *testing.T) {
 		t.Errorf("plain error must stay internal, got %s", te.Code)
 	}
 }
+
+func TestFromStreamErrorMessageIsScrubbed(t *testing.T) {
+	te := FromStreamError(errors.New("RTSP describe failed: token=abcdef123456 rejected"), "cam", "Describe")
+	if strings.Contains(te.Message, "abcdef123456") {
+		t.Errorf("message keeps a secret: %q", te.Message)
+	}
+}

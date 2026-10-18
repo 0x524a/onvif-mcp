@@ -238,27 +238,54 @@ func TestStreamProbeScrubRemovesEveryFormOfTheSecret(t *testing.T) {
 }
 
 func TestStreamProbeScrubRemovesEncodedAndCasedEchoes(t *testing.T) {
-	const pw = "zqxv-MixedCase-Pw9" //nolint:gosec // fixed test secret, not a credential
-	e := streamEntry(config.Camera{Username: "operator", Password: pw})
+	// The user name is not a multiple of three bytes long, so the base64 of
+	// "user:pass" does not contain the base64 of "pass". Passwords of varying
+	// length give padded and unpadded forms, and '?' and '>' put '+' and '/'
+	// in the standard alphabet and '-' and '_' in the URL one.
+	for k := 1; k <= 5; k++ {
+		for _, tail := range []string{"", "a", "ab"} {
+			pw := "zqxv-" + strings.Repeat("?>", k) + "Mixed" + tail
+			e := streamEntry(config.Camera{Username: "admin", Password: pw})
+			sp, err := e.PrepareStream("rtsp://192.0.2.10/s")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var echoes []string
+			for _, raw := range []string{"admin:" + pw, pw} {
+				for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+					echoes = append(echoes, enc.EncodeToString([]byte(raw)))
+				}
+			}
+			echoes = append(echoes, strings.ToLower(pw), strings.ToUpper(pw), "ZQxv-"+strings.Repeat("?>", k)+"mIXED"+tail)
+			for _, echo := range echoes {
+				out := sp.Scrub("bad status code: 404 (" + echo + ")")
+				if strings.Contains(out, echo) {
+					t.Errorf("pw %q: Scrub left the echo %q in %q", pw, echo, out)
+				}
+				// A form that removes only a prefix of the echo (an unpadded
+				// form of a padded one) leaves a stray "=" behind.
+				if strings.Contains(out, "REDACTED=") || strings.Contains(out, "=)") {
+					t.Errorf("pw %q: echo %q left residue in %q", pw, echo, out)
+				}
+			}
+		}
+	}
+	e := streamEntry(config.Camera{Username: "admin", Password: "zqxv-ordinary"}) //nolint:gosec // fixed test secret, not a credential
+	sp, _ := e.PrepareStream("rtsp://192.0.2.10/s")
+	if out := sp.Scrub("RTSP describe failed: bad status code: 404 (Not Found)"); !strings.Contains(out, "Not Found") {
+		t.Errorf("ordinary status text was damaged: %q", out)
+	}
+}
+
+// A password under three bytes would shred ordinary text, so the any-case
+// matcher is not built for it.
+func TestStreamProbeShortPasswordDoesNotShredText(t *testing.T) {
+	e := streamEntry(config.Camera{Username: "admin", Password: "No"})
 	sp, err := e.PrepareStream("rtsp://192.0.2.10/s")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var echoes []string
-	for _, raw := range []string{"operator:" + pw, pw} {
-		for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
-			echoes = append(echoes, enc.EncodeToString([]byte(raw)))
-		}
-	}
-	echoes = append(echoes, strings.ToLower(pw), strings.ToUpper(pw), "zqXV-mixedcase-PW9")
-	for _, echo := range echoes {
-		for _, text := range []string{"bad status code: 404 (" + echo + ")", "x " + echo + " y"} {
-			if out := sp.Scrub(text); strings.Contains(out, echo) {
-				t.Errorf("Scrub(%q) = %q still holds the echo", text, out)
-			}
-		}
-	}
-	if out := sp.Scrub("RTSP describe failed: bad status code: 404 (Not Found)"); !strings.Contains(out, "Not Found") {
-		t.Errorf("ordinary status text was damaged: %q", out)
+	if out := sp.Scrub("Not Found"); out != "Not Found" {
+		t.Errorf("short password redacted prose: %q", out)
 	}
 }

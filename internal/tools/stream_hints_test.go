@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -42,6 +43,13 @@ func TestInspectTextContentCarriesTheTracks(t *testing.T) {
 			}
 			if strings.Contains(txt, "REDACTED") {
 				t.Errorf("text was redacted: %q", txt)
+			}
+			wantAuth := "probed without credentials"
+			if !cam.TrustAdvertisedHosts {
+				wantAuth = "probed with the camera's credentials"
+			}
+			if !strings.Contains(txt, wantAuth) {
+				t.Errorf("text %q lacks %q", txt, wantAuth)
 			}
 		})
 	}
@@ -188,5 +196,41 @@ func TestInspectNilProberDefaultsToTheRealOne(t *testing.T) {
 	env := streamSession(t, "rtsp://127.0.0.1:1/s", config.Camera{}, nil)
 	if code, _ := errCode(t, inspect(t, env.cs, nil)); code != "unreachable" {
 		t.Errorf("code = %q", code)
+	}
+}
+
+// The prober's own scrubbing is not the only defence: the tool removes the
+// credentials in every form it knows, including a base64 echo of the Basic
+// payload, which the general redactor does not recognise.
+func TestInspectScrubsABase64EchoOfTheCredentials(t *testing.T) {
+	echo := base64.StdEncoding.EncodeToString([]byte(canaryUser + ":" + canaryPass))
+	env := streamSession(t, "rtsp://127.0.0.1:1/s", config.Camera{}, failWith("bad status code: 404 ("+echo+")"))
+	if w := wire(t, inspect(t, env.cs, nil)); strings.Contains(w, echo) {
+		t.Errorf("the base64 echo reached the wire: %s", w)
+	}
+}
+
+func TestTrackInfosCleansWhatTheProberReturned(t *testing.T) {
+	got := trackInfos(&probe.Result{Tracks: []probe.Track{{Index: 3, Type: "vi\x1bdeo", Format: "H2\u202e64", Width: 4, Height: 5}}})
+	if len(got) != 1 || got[0].Type != "video" || got[0].Format != "H264" || got[0].Index != 3 || got[0].Width != 4 || got[0].Height != 5 {
+		t.Errorf("trackInfos = %+v", got)
+	}
+}
+
+// Shutdown must stop an in-flight stream.inspect: with the server context
+// already done, nothing is probed.
+func TestInspectIsScopedToTheServerContext(t *testing.T) {
+	base, cancel := context.WithCancel(context.Background())
+	cancel()
+	p := &captureProber{res: h264Result()}
+	env := streamSessionBase(base, t, "rtsp://127.0.0.1:1/s", config.Camera{}, p)
+	res := inspect(t, env.cs, nil)
+	if !res.IsError {
+		t.Errorf("want an error once the server is shutting down: %s", wire(t, res))
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.urls) != 0 {
+		t.Errorf("the prober was called %d time(s) after shutdown began", len(p.urls))
 	}
 }

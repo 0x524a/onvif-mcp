@@ -117,6 +117,12 @@ type streamEnv struct {
 // fixture advertising uri as the stream of every profile.
 func streamSession(t *testing.T, uri string, cam config.Camera, p probe.Prober) streamEnv {
 	t.Helper()
+	return streamSessionBase(nil, t, uri, cam, p) //nolint:staticcheck // nil Base means no shutdown scope
+}
+
+// streamSessionBase is streamSession with the server's shutdown context set.
+func streamSessionBase(base context.Context, t *testing.T, uri string, cam config.Camera, p probe.Prober) streamEnv {
+	t.Helper()
 	fx := fixture(t, streamBody(uri))
 	cam.ID = "fx"
 	cam.Endpoint = fx.URL + "/device_service"
@@ -131,6 +137,7 @@ func streamSession(t *testing.T, uri string, cam config.Camera, p probe.Prober) 
 		Reg:    registry.New(&config.Config{Cameras: map[string]*config.Camera{"fx": &cam}}),
 		Log:    slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Prober: p,
+		Base:   base,
 	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
 	RegisterStream(srv, d)
