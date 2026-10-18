@@ -60,8 +60,9 @@ func summarize(cams []registry.Status) string {
 type Option func(*options)
 
 type options struct {
-	base   context.Context
-	prober probe.Prober
+	base             context.Context
+	prober           probe.Prober
+	snapshotMaxBytes int
 }
 
 // WithBaseContext makes every tool call also stop when base is done. The SDK
@@ -76,6 +77,14 @@ func WithBaseContext(base context.Context) Option {
 // in-process RTSP server.
 func WithProber(p probe.Prober) Option {
 	return func(o *options) { o.prober = p }
+}
+
+// WithSnapshotMaxBytes sets the largest image camera.snapshot returns, in raw
+// bytes. The default is tools.DefaultSnapshotMaxBytes (1 MiB). The value is not
+// range checked here; the command validates the operator's flag with
+// tools.CheckSnapshotMaxBytes.
+func WithSnapshotMaxBytes(n int) Option {
+	return func(o *options) { o.snapshotMaxBytes = n }
 }
 
 const argHint = "Pass a JSON object containing only the fields declared in the tool's inputSchema, with the declared types."
@@ -170,7 +179,7 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 	if prober == nil {
 		prober = probe.NewRTSP()
 	}
-	deps := tools.Deps{Reg: reg, Log: log, Base: o.base, Policy: policy, Prober: prober}
+	deps := tools.Deps{Reg: reg, Log: log, Base: o.base, Policy: policy, Prober: prober, SnapshotMaxBytes: o.snapshotMaxBytes}
 
 	// Always tools.GuardedTool (which wraps the generic free function), never
 	// the srv.AddTool method: the method skips input validation and turns
@@ -224,6 +233,7 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 	tools.RegisterPTZReads(srv, deps)
 	tools.RegisterCamera(srv, deps)
 	tools.RegisterStream(srv, deps)
+	tools.RegisterSnapshot(srv, deps)
 
 	// The only write tool. It goes through tools.GuardedTool, which keeps it
 	// out of tools/list while control is disabled and lists it in the policy.
@@ -238,6 +248,6 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 		return grants
 	})
 
-	log.Debug("tools registered", "count", 10)
+	log.Debug("tools registered", "count", 11)
 	return srv
 }

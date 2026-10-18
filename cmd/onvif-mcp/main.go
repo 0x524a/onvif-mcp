@@ -18,6 +18,7 @@ import (
 	"github.com/0x524a/onvif-mcp/internal/registry"
 	"github.com/0x524a/onvif-mcp/internal/safety"
 	"github.com/0x524a/onvif-mcp/internal/stdio"
+	"github.com/0x524a/onvif-mcp/internal/tools"
 )
 
 func main() {
@@ -40,6 +41,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	cfgPath := fs.String("config", "", "path to the camera config file (required)")
 	enableControl := fs.Bool("enable-control", false,
 		"permit state-changing tools; each camera must also opt in via its config entry")
+	snapshotMax := fs.Int("snapshot-max-bytes", tools.DefaultSnapshotMaxBytes,
+		fmt.Sprintf("largest image camera.snapshot returns, in raw bytes (%d to %d); a larger snapshot is refused, not cut",
+			tools.MinSnapshotMaxBytes, tools.MaxSnapshotMaxBytes))
 	showVersion := fs.Bool("version", false, "print the version to stdout and exit")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -53,11 +57,16 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return 0
 	}
 
+	if err := tools.CheckSnapshotMaxBytes(*snapshotMax); err != nil {
+		_, _ = fmt.Fprintln(stderr, "onvif-mcp: -"+err.Error())
+		return 2
+	}
+
 	log := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	if *cfgPath == "" {
 		log.Error("missing required flag: -config")
-		_, _ = fmt.Fprintln(stderr, "usage: onvif-mcp -config <path> [-enable-control]   (the config file must be mode 600; see the README)")
+		_, _ = fmt.Fprintln(stderr, "usage: onvif-mcp -config <path> [-enable-control] [-snapshot-max-bytes N]   (the config file must be mode 600; see the README)")
 		return 2
 	}
 	cfg, err := config.Load(*cfgPath)
@@ -78,11 +87,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		Log:            log,
 	})
 	log.Info("starting", "control_enabled", cfg.ControlEnabled, "write_tools_registered", policy.WriteRegistered(),
-		"transport", "stdio")
+		"snapshot_max_bytes", *snapshotMax, "transport", "stdio")
 
 	// ctx is also the base context of every tool call, so a signal aborts
 	// in-flight camera I/O instead of waiting for it to time out.
-	srv := mcpserver.New(reg, log, policy, mcpserver.WithBaseContext(ctx))
+	srv := mcpserver.New(reg, log, policy, mcpserver.WithBaseContext(ctx), mcpserver.WithSnapshotMaxBytes(*snapshotMax))
 	tr := stdio.NewTransport(stdin, stdout, stdio.MaxLineBytes, log)
 	err = srv.Run(ctx, tr)
 	if err != nil && !errors.Is(err, context.Canceled) && !isStdinClosed(err) {

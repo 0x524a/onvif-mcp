@@ -576,3 +576,56 @@ func (s *session) handshakeCall(pass string) {
 		}
 	}
 }
+
+func TestSnapshotMaxBytesFlagIsValidated(t *testing.T) {
+	cfg := writeConfig(t, 0o600, "http://192.0.2.10/onvif/device_service", "u", "hunter2-secret")
+	for _, v := range []string{"0", "1023", "8388609", "-1", "abc", "1.5"} {
+		so, se, code := runBin(t, "-config", cfg, "-snapshot-max-bytes", v)
+		if code != 2 || so != "" || se == "" {
+			t.Errorf("%s: code=%d stdout=%q stderr=%q, want exit 2", v, code, so, se)
+		}
+		if v != "abc" && v != "1.5" && !strings.Contains(se, "snapshot-max-bytes must be between 1024 and 8388608") {
+			t.Errorf("%s: stderr = %q", v, se)
+		}
+	}
+	// -version still works whatever the other flags say.
+	if _, _, code := runBin(t, "-version", "-snapshot-max-bytes", "1"); code != 0 {
+		t.Errorf("-version exited %d", code)
+	}
+}
+
+func TestSnapshotMaxBytesFlagReachesTheTool(t *testing.T) {
+	cam := testcam.Start(t)
+	cfg := writeConfig(t, 0o600, cam.Endpoint(), cam.Username(), cam.Password())
+	for _, tc := range []struct {
+		args    []string
+		wantErr bool
+	}{{nil, false}, {[]string{"-snapshot-max-bytes", "2048"}, true}} {
+		s, se := startSession(t, cfg, tc.args...)
+		s.initialize()
+		s.send(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": map[string]any{
+			"name": "camera.snapshot", "arguments": map[string]any{"camera": "cam1", "profile": cam.ProfileToken()}}})
+		line := s.recv()
+		cr, _ := line["result"].(map[string]any)
+		if cr == nil || (cr["isError"] == true) != tc.wantErr {
+			t.Fatalf("args %v: result = %v", tc.args, line)
+		}
+		raw, _ := json.Marshal(cr)
+		if tc.wantErr && !strings.Contains(string(raw), "over the 2048 byte limit") {
+			t.Errorf("refusal lacks the limit: %s", raw)
+		}
+		if !tc.wantErr && !strings.Contains(string(raw), `"type":"image"`) {
+			t.Errorf("no image content: %.300s", raw)
+		}
+		if strings.Contains(string(raw), cam.Password()) {
+			t.Error("password on stdout")
+		}
+		_ = s.stdin.Close()
+		if code, ok := s.wait(15 * time.Second); !ok || code != 0 {
+			t.Fatalf("ok=%v code=%d stderr=%s", ok, code, se)
+		}
+		if !strings.Contains(se.String(), fmt.Sprintf("snapshot_max_bytes=%d", map[bool]int{false: 1048576, true: 2048}[tc.wantErr])) {
+			t.Errorf("stderr does not report the cap:\n%s", se.String())
+		}
+	}
+}

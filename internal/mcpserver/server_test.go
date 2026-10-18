@@ -120,7 +120,7 @@ func TestEveryToolCarriesExactAnnotations(t *testing.T) {
 	wantOpen := map[string]bool{
 		"camera.list": false, "camera.discover": true, "camera.describe": false,
 		"media.profiles": false, "media.stream_uri": false, "stream.inspect": true,
-		"ptz.status": false, "ptz.presets": false, "imaging.settings": false,
+		"camera.snapshot": false, "ptz.status": false, "ptz.presets": false, "imaging.settings": false,
 	}
 	if len(res.Tools) != len(wantOpen) {
 		t.Errorf("registered %d tools, want %d", len(res.Tools), len(wantOpen))
@@ -603,8 +603,8 @@ func TestEveryToolSchemaFieldIsDescribed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Tools) != 9 {
-		t.Fatalf("expected 9 tools, got %d", len(res.Tools))
+	if len(res.Tools) != 10 {
+		t.Fatalf("expected 10 tools, got %d", len(res.Tools))
 	}
 	for _, tool := range res.Tools {
 		for label, s := range map[string]any{"input": tool.InputSchema, "output": tool.OutputSchema} {
@@ -639,6 +639,7 @@ func TestToolDescriptionsGuideUse(t *testing.T) {
 		"ptz.presets":      {"media.profiles", "has_ptz", "-1"},
 		"imaging.settings": {"media.profiles", "video_source_token", "scale"},
 		"stream.inspect":   {"media.profiles", "media.stream_uri", "best-effort", "trust_advertised_hosts", "Does not fetch frames"},
+		"camera.snapshot":  {"media.profiles", "1 MiB", "lower-resolution profile", "trust_advertised_hosts", "Does not record or stream video"},
 	}
 	for _, tool := range res.Tools {
 		want, ok := mustHave[tool.Name]
@@ -683,5 +684,51 @@ func TestStreamInspectIsWiredWithAnInjectedProber(t *testing.T) {
 	}
 	if strings.Contains(string(b), cam.Password()) {
 		t.Errorf("password in output: %s", b)
+	}
+}
+
+// camera.snapshot is wired with the operator's size cap, returns the image
+// inline, and rejects bad input in the shared error envelope.
+func TestSnapshotIsWiredWithTheConfiguredCap(t *testing.T) {
+	cam := testcam.Start(t)
+	reg := registry.New(&config.Config{Cameras: map[string]*config.Camera{
+		"cam-a": {ID: "cam-a", Endpoint: cam.Endpoint(), Username: cam.Username(), Password: cam.Password()},
+	}})
+	args := map[string]any{"camera": "cam-a", "profile": cam.ProfileToken()}
+	callSnap := func(cs *mcp.ClientSession, a map[string]any) *mcp.CallToolResult {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "camera.snapshot", Arguments: a})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	res := callSnap(connect(t, New(reg, quietLog(), testPolicy(reg, false))), args)
+	var img *mcp.ImageContent
+	for _, c := range res.Content {
+		if i, ok := c.(*mcp.ImageContent); ok {
+			img = i
+		}
+	}
+	if res.IsError || img == nil || img.MIMEType != "image/jpeg" || len(img.Data) == 0 {
+		t.Fatalf("default cap: %v", res)
+	}
+	if b, _ := json.Marshal(res); strings.Contains(string(b), cam.Password()) {
+		t.Error("password in output")
+	}
+
+	small := connect(t, New(reg, quietLog(), testPolicy(reg, false), WithSnapshotMaxBytes(2048)))
+	res = callSnap(small, args)
+	b, _ := json.Marshal(res)
+	if !res.IsError || !strings.Contains(string(b), "over the 2048 byte limit") || !strings.Contains(string(b), "media.profiles") {
+		t.Errorf("cap of 2048: %s", b)
+	}
+
+	// Schema failures use the same envelope as every other tool.
+	res = callSnap(small, map[string]any{"camera": "cam-a"})
+	sc, _ := res.StructuredContent.(map[string]any)
+	e, _ := sc["error"].(map[string]any)
+	if !res.IsError || e["code"] != "invalid_argument" {
+		t.Errorf("missing profile: %v", res)
 	}
 }

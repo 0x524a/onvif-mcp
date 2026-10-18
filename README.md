@@ -48,8 +48,9 @@ address on another host".
 For a camera behind NAT or with several addresses, set `"trust_advertised_hosts": true` on
 that camera to turn the check off for it. The default is `false`. Hosts are compared as
 written, so a camera configured by name that advertises its IP address needs the flag too.
-The same flag decides whether `stream.inspect` may probe a stream on another host; it never
-makes onvif-mcp send credentials there (see "Stream credentials" below).
+The same flag decides whether `stream.inspect` may probe a stream, and `camera.snapshot` may
+fetch an image, on another host; it never makes onvif-mcp send credentials there (see
+"Stream credentials" and "Snapshots" below).
 
 A reply body over 8 MiB is rejected with `device_fault` ("camera response too large")
 instead of being read into memory.
@@ -64,6 +65,7 @@ onvif-mcp -config cameras.json
 |------|---------|
 | `-config PATH` | Camera config file. Required. |
 | `-enable-control` | Permit state-changing tools (each camera must also opt in). |
+| `-snapshot-max-bytes N` | Largest image `camera.snapshot` returns, in raw bytes. Default 1048576 (1 MiB); allowed 1024 to 8388608. Not a config-file setting. |
 | `-version` | Print the version to stdout and exit without starting the server. |
 
 Write tools are rate limited per device: one movement per 2 seconds, burst 1. The budget is
@@ -87,6 +89,7 @@ usage error such as an unknown flag or a missing `-config`.
 | `media.profiles` | Media profiles and whether each has PTZ | read-only |
 | `media.stream_uri` | Stream URI for a profile, credentials removed | read-only |
 | `stream.inspect` | Open a profile's RTSP stream and report codecs, tracks and best-effort resolution | read-only, open-world |
+| `camera.snapshot` | Capture one still image from a profile and return it inline | read-only |
 | `imaging.settings` | Current imaging settings of a video source | read-only |
 | `ptz.status` | Current PTZ position and movement state | read-only |
 | `ptz.presets` | Stored presets and reported movement limits | read-only |
@@ -157,6 +160,12 @@ onvif-mcp -config cameras.json -enable-control
   clamped to 10; it is independent of the camera's own `timeout_seconds` config setting. A
   stream that answers with an RTSP redirect is not followed (`device_fault`). Credentials never
   appear in its input or output (see below).
+- `camera.snapshot` returns one JPEG or PNG as image content, with a one-line summary and
+  `bytes`, `mime_type`, `width`, `height`, `profile` and `truncated` (always false) in the
+  structured result. **The image enters the agent's context window**, so it is capped at
+  1 MiB of raw bytes by default (`-snapshot-max-bytes`). A larger image is refused with its
+  size, the limit and a hint to choose a lower-resolution profile from `media.profiles`; it is
+  never cut. See "Snapshots" below.
 - `camera.discover` blocks for its whole probe window (3 s by default, 10 s at most). The
   underlying library checks for cancellation only between packets, so a cancel or shutdown
   waits out the rest of the window. A host with no usable network interface fails with
@@ -189,6 +198,37 @@ RTSP URL itself, inside the server process, and only under these rules:
   unprintable registry type that only this tool can reach, and every output passes the
   redactor.
 
+### Snapshots
+
+The snapshot address comes from the camera (ONVIF `GetSnapshotUri`), so it is treated as
+hostile input. onvif-go's `DownloadFile` is not used for the fetch: it sends Basic credentials
+to whatever URL it is given before any challenge, its Digest fallback follows redirects through
+an unguarded client, and it reads the body without a limit. `camera.snapshot` fetches with its
+own client inside the registry instead:
+
+- The scheme must be `http` or `https`. A host other than the camera's configured one is
+  refused as `device_fault` with **no request sent**; with `trust_advertised_hosts` it is
+  fetched **without credentials** (so it must serve snapshots unauthenticated). Unspecified,
+  multicast, broadcast and link-local addresses, numeric host spellings, and names that
+  resolve to them are refused even then.
+- The host is resolved once and the connection goes to that address only. Redirects are never
+  followed (a 3xx is `device_fault`); keep-alive, proxies and transparent decompression are off.
+- The camera's credentials are sent only to the camera's own host, only after it answers 401,
+  and by the method it asks for: Digest if offered, otherwise Basic. One authenticated retry;
+  a second 401 is `auth_failed`. Basic is the camera's choice and sends the password in the
+  clear over plain `http`, as most cameras' web servers allow; prefer an `https` snapshot
+  address or Digest where the camera offers them. An on-path attacker on an `http` camera
+  link can request Basic instead of Digest; onvif-mcp does not defend against that.
+- The body is read through a hard limit of the cap plus one byte, so an endless or 2 GB reply
+  is never buffered, and a declared length over the cap is refused before any body is read.
+- The image type is decided from the bytes, never from the reply's `Content-Type`. Only JPEG
+  and PNG are returned. An HTML login page, SVG, text, GIF, WebP or anything else is
+  `device_fault` ("the snapshot address did not return an image") and the reply is not shown.
+  The header is parsed for its size, and an image over 16384 pixels on a side or 64 megapixels
+  is refused. The pixels are not decoded, so a truncated image with a valid header is returned
+  as it came.
+- The snapshot address and the credentials never appear in the input or output.
+
 ## Scope / what this does not do
 
 onvif-mcp deliberately exposes a small surface. It does **not**:
@@ -202,10 +242,16 @@ onvif-mcp deliberately exposes a small surface. It does **not**:
   configuration.
 - Serve video. It reports stream URIs and inspects stream metadata; it never
   proxies, records or transcodes media, and `stream.inspect` fetches no frames.
+  `camera.snapshot` returns one still image per call, nothing continuous.
+- Keep images out of the agent's context. A snapshot is returned inline, so it enters the
+  context window; the size cap (default 1 MiB, `-snapshot-max-bytes`) is the only control. It
+  does not resize, re-encode or crop, and it does not return a link instead, because a stdio
+  server has nothing to serve one from.
 - Stay inside the ONVIF service. `stream.inspect` is open-world: it connects to a stream
-  endpoint, which is a separate service from the camera's ONVIF one. The camera's
-  credentials leave the process only toward the camera's own host, and never toward
-  another host; with `trust_advertised_hosts`, another host is probed without them.
+  endpoint, which is a separate service from the camera's ONVIF one, and `camera.snapshot`
+  makes an HTTP request to the camera's snapshot address, which is often a different port.
+  The camera's credentials leave the process only toward the camera's own host, and never
+  toward another host; with `trust_advertised_hosts`, another host is contacted without them.
 - Discover and then drive a camera automatically. Discovery returns candidates
   only; a human must add a camera to the config before it is addressable.
 - Verify advertised capabilities. `camera.describe` reports what a device claims,
