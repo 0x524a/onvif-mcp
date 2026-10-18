@@ -72,7 +72,7 @@ func WithBaseContext(base context.Context) Option {
 }
 
 // WithProber replaces the RTSP prober stream.inspect uses. The default is the
-// real one (probe.NewRTSPeek); tests inject a fake or point it at an
+// real one (probe.NewRTSP); tests inject a fake or point it at an
 // in-process RTSP server.
 func WithProber(p probe.Prober) Option {
 	return func(o *options) { o.prober = p }
@@ -168,7 +168,7 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 	srv.AddReceivingMiddleware(auditRejected(policy), argumentErrors)
 	prober := o.prober
 	if prober == nil {
-		prober = probe.NewRTSPeek()
+		prober = probe.NewRTSP()
 	}
 	deps := tools.Deps{Reg: reg, Log: log, Base: o.base, Policy: policy, Prober: prober}
 

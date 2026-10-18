@@ -379,7 +379,7 @@ func TestInspectFullPathAgainstAuthenticatedServer(t *testing.T) {
 					t.Skip("test server cannot parse a colon in a Basic password")
 				}
 				srv := startRTSP(t, "127.0.0.1", canaryUser, pw, m...)
-				env := streamSession(t, "rtsp://127.0.0.1:"+portOf(srv.addr)+"/s", config.Camera{Password: pw}, probe.NewRTSPeek())
+				env := streamSession(t, "rtsp://127.0.0.1:"+portOf(srv.addr)+"/s", config.Camera{Password: pw}, probe.NewRTSP())
 				res := inspect(t, env.cs, map[string]any{"timeout_seconds": 5})
 				d := dataMap(t, res)
 				if d["authenticated"] != true || d["describe_ok"] != true {
@@ -405,7 +405,7 @@ func TestInspectFullPathAgainstAuthenticatedServer(t *testing.T) {
 
 func TestInspectReportsResolutionFromSPS(t *testing.T) {
 	srv := startRTSP(t, "127.0.0.1", "", "")
-	env := streamSession(t, "rtsp://127.0.0.1:"+portOf(srv.addr)+"/s", config.Camera{}, probe.NewRTSPeek())
+	env := streamSession(t, "rtsp://127.0.0.1:"+portOf(srv.addr)+"/s", config.Camera{}, probe.NewRTSP())
 	res := inspect(t, env.cs, nil)
 	d := dataMap(t, res)
 	if d["authenticated"] != true { // anonymous server, but the camera has credentials configured
@@ -419,7 +419,7 @@ func TestInspectReportsResolutionFromSPS(t *testing.T) {
 
 func TestInspectWrongPasswordFailsLegiblyWithoutLeak(t *testing.T) {
 	srv := startRTSP(t, "127.0.0.1", canaryUser, "the-real-one")
-	env := streamSession(t, "rtsp://127.0.0.1:"+portOf(srv.addr)+"/s", config.Camera{}, probe.NewRTSPeek())
+	env := streamSession(t, "rtsp://127.0.0.1:"+portOf(srv.addr)+"/s", config.Camera{}, probe.NewRTSP())
 	res := inspect(t, env.cs, nil)
 	if !res.IsError {
 		t.Fatalf("expected an error: %s", wire(t, res))
@@ -496,7 +496,7 @@ func TestInspectForeignHostIsRefusedAndNeverContacted(t *testing.T) {
 	p := &captureProber{res: h264Result()}
 	// Real prober and a counting listener: zero connections is observable
 	// at the socket, not only at the fake.
-	for name, prober := range map[string]probe.Prober{"real": probe.NewRTSPeek(), "fake": p} {
+	for name, prober := range map[string]probe.Prober{"real": probe.NewRTSP(), "fake": p} {
 		t.Run(name, func(t *testing.T) {
 			for _, uri := range []string{
 				"rtsp://" + foreign.addr() + "/s",
@@ -538,7 +538,7 @@ func TestInspectForeignHostIsRefusedAndNeverContacted(t *testing.T) {
 func TestInspectTrustedForeignHostIsProbedWithoutCredentials(t *testing.T) {
 	srv := startRTSP(t, "127.0.0.2", "", "")
 	uri := "rtsp://" + canaryUser + ":" + "camera-supplied" + "@" + srv.addr + "/s"
-	env := streamSession(t, uri, config.Camera{TrustAdvertisedHosts: true}, probe.NewRTSPeek())
+	env := streamSession(t, uri, config.Camera{TrustAdvertisedHosts: true}, probe.NewRTSP())
 	res := inspect(t, env.cs, nil)
 	d := dataMap(t, res)
 	if d["authenticated"] != false || d["describe_ok"] != true {
@@ -603,7 +603,7 @@ func TestInspectRefusesUnusableSchemesAndPorts(t *testing.T) {
 func TestInspectStripsCameraUserinfoFromSameHostURI(t *testing.T) {
 	srv := startRTSP(t, "127.0.0.1", canaryUser, "right-pass")
 	uri := "rtsp://attacker:their-pass@127.0.0.1:" + portOf(srv.addr) + "/s"
-	env := streamSession(t, uri, config.Camera{Password: "right-pass"}, probe.NewRTSPeek())
+	env := streamSession(t, uri, config.Camera{Password: "right-pass"}, probe.NewRTSP())
 	res := inspect(t, env.cs, nil)
 	d := dataMap(t, res)
 	if d["authenticated"] != true {
@@ -616,7 +616,7 @@ func TestInspectStripsCameraUserinfoFromSameHostURI(t *testing.T) {
 
 func TestInspectHungServerReturnsWithinTheTimeout(t *testing.T) {
 	srv := startRaw(t, "127.0.0.1", "hang", "")
-	env := streamSession(t, "rtsp://127.0.0.1:"+portOf(srv.addr())+"/s", config.Camera{}, probe.NewRTSPeek())
+	env := streamSession(t, "rtsp://127.0.0.1:"+portOf(srv.addr())+"/s", config.Camera{}, probe.NewRTSP())
 	start := time.Now()
 	res := inspect(t, env.cs, map[string]any{"timeout_seconds": 1})
 	if d := time.Since(start); d > 3500*time.Millisecond {
@@ -639,7 +639,7 @@ func TestInspectHostileSDPIsCapped(t *testing.T) {
 
 func hostileSDP(t *testing.T, n int) {
 	srv := startRaw(t, "127.0.0.1", "sdp", sdpTracks(n))
-	env := streamSession(t, "rtsp://127.0.0.1:"+portOf(srv.addr())+"/s", config.Camera{}, probe.NewRTSPeek())
+	env := streamSession(t, "rtsp://127.0.0.1:"+portOf(srv.addr())+"/s", config.Camera{}, probe.NewRTSP())
 	res := inspect(t, env.cs, map[string]any{"timeout_seconds": 5})
 	if res.IsError {
 		assertNoLeak(t, "wire", wire(t, res))
@@ -680,7 +680,7 @@ func TestInspectClosedPortIsUnreachable(t *testing.T) {
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	addr := ln.Addr().String()
 	_ = ln.Close()
-	env := streamSession(t, "rtsp://"+addr+"/s", config.Camera{}, probe.NewRTSPeek())
+	env := streamSession(t, "rtsp://"+addr+"/s", config.Camera{}, probe.NewRTSP())
 	res := inspect(t, env.cs, nil)
 	if code, _ := errCode(t, res); code != "unreachable" {
 		t.Errorf("code = %q: %s", code, wire(t, res))

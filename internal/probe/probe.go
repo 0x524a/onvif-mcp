@@ -1,9 +1,9 @@
-// Package probe wraps rtspeek behind an interface onvif-mcp can fake.
+// Package probe runs the RTSP OPTIONS + DESCRIBE handshake behind an
+// interface onvif-mcp can fake.
 //
-// The interface exists for two reasons. rtspeek's StreamInfo is an interface
-// whose only implementation is unexported with no constructor, so a fake cannot
-// be built at that boundary. And rtspeek is a young dependency with no
-// stability guarantee, so keeping it behind a narrow port keeps it swappable.
+// The real prober drives a gortsplib client directly (see NewRTSP for why it
+// does not use rtspeek.DescribeStream). rtspeek is still used for its error
+// sentinel and error classifier.
 //
 // The real prober treats the stream server as hostile. Output is bounded
 // (track count, string length, dimensions, latency), the call always returns
@@ -14,15 +14,29 @@ package probe
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
+	"io"
 	"math"
+	"net"
+	"net/netip"
 	"net/url"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/0x524A/rtspeek/pkg/rtspeek"
+	"github.com/bluenviron/gortsplib/v5"
+	"github.com/bluenviron/gortsplib/v5/pkg/base"
+	"github.com/bluenviron/gortsplib/v5/pkg/description"
+	"github.com/bluenviron/gortsplib/v5/pkg/format"
+	"github.com/bluenviron/gortsplib/v5/pkg/liberrors"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 
 	"github.com/0x524a/onvif-mcp/internal/redact"
 )
@@ -68,19 +82,40 @@ type Prober interface {
 	Describe(ctx context.Context, rtspURL string, timeout time.Duration) (*Result, error)
 }
 
-type rtspeekProber struct{}
+type rtspProber struct{}
 
-// NewRTSPeek returns a Prober backed by rtspeek.DescribeStream
-// (rtspeek pkg/rtspeek/client.go). A non-positive timeout means 10s; it is
-// capped at 60s.
-func NewRTSPeek() Prober { return rtspeekProber{} }
+// NewRTSP returns a Prober that runs the RTSP OPTIONS + DESCRIBE handshake on
+// a gortsplib client built here (gortsplib v5: Client.Start, Options,
+// Describe). It does not call rtspeek.DescribeStream: that function drives a
+// client that follows 3xx redirects to other hosts with the credentials
+// attached and cannot be cancelled once a redirect loop starts, and rtspeek
+// exposes neither a dialer nor a redirect switch. Track classification is
+// reimplemented from the SDP media descriptions (rtspeek's classifier is
+// unexported); H.264/H.265 resolution uses the mediacommon SPS parser, the
+// same one rtspeek uses.
+//
+// The client may reach exactly one address: the host:port of the URL, resolved
+// once up front. Any other dial, and any 3xx response, is an error. A
+// non-positive timeout means 10s; it is capped at 60s.
+func NewRTSP() Prober { return rtspProber{} }
+
+// ErrEndedDuringDescribe is attached to the error returned when the stream
+// server drops the connection (EOF or reset) while answering DESCRIBE.
+var ErrEndedDuringDescribe = errors.New("stream ended the connection during DESCRIBE")
+
+// ErrRedirected and errDialRefused are the errors for a 3xx and for a dial the
+// client may not make.
+var (
+	ErrRedirected  = errors.New("stream redirected; not followed")
+	errDialRefused = errors.New("stream client refused to dial an address other than the probed one")
+)
 
 type outcome struct {
-	info rtspeek.StreamInfo
-	err  error
+	res *Result
+	err error
 }
 
-func (rtspeekProber) Describe(ctx context.Context, rtspURL string, timeout time.Duration) (*Result, error) {
+func (rtspProber) Describe(ctx context.Context, rtspURL string, timeout time.Duration) (*Result, error) {
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
@@ -89,9 +124,13 @@ func (rtspeekProber) Describe(ctx context.Context, rtspURL string, timeout time.
 	}
 	secrets := secretsOf(rtspURL)
 
+	u, err := base.ParseURL(rtspURL)
+	if err != nil || (u.Scheme != "rtsp" && u.Scheme != "rtsps") || u.Hostname() == "" {
+		return nil, newError("invalid rtsp url", rtspeek.ErrInvalidURL)
+	}
+
 	// A fresh context linked only by cancellation: values from the caller are
-	// dropped, so rtspeek's debug-trace switch (a context value) can never be
-	// turned on from outside.
+	// dropped.
 	cctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	stop := context.AfterFunc(ctx, cancel)
@@ -104,8 +143,8 @@ func (rtspeekProber) Describe(ctx context.Context, rtspURL string, timeout time.
 				done <- outcome{err: errors.New("stream probe failed internally")}
 			}
 		}()
-		si, err := rtspeek.DescribeStream(cctx, rtspURL, timeout)
-		done <- outcome{info: si, err: err}
+		res, err := describe(cctx, u, timeout)
+		done <- outcome{res: res, err: err}
 	}()
 
 	guard := time.NewTimer(timeout + guardSlack)
@@ -117,30 +156,159 @@ func (rtspeekProber) Describe(ctx context.Context, rtspURL string, timeout time.
 	case <-guard.C:
 		return nil, newError("stream probe timed out", context.DeadlineExceeded)
 	}
-
 	if o.err != nil {
 		return nil, wrapError(ctx, cctx, o.err, secrets)
 	}
-	if o.info == nil {
-		return nil, errors.New("stream probe returned no data")
+	return Bound(o.res), nil
+}
+
+// describe runs the handshake. It owns the client and always closes it, and
+// closes it early when ctx ends, so a cancelled or timed-out probe leaves no
+// connection or goroutine behind.
+func describe(ctx context.Context, u *base.URL, timeout time.Duration) (*Result, error) {
+	start := time.Now()
+	addr := canonicalAddr(u)
+	host, port, _ := net.SplitHostPort(addr)
+
+	// Resolve once. Every dial goes to this IP, so a resolver that answers
+	// differently the second time cannot move the connection.
+	ip, err := resolveOnce(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("connection failed: %w", err)
 	}
-	out := &Result{
-		Reachable:  o.info.IsReachable(),
-		DescribeOK: o.info.IsDescribeSucceeded(),
-		Protocol:   o.info.GetProtocolName(),
-		LatencyMs:  o.info.LatencyMs(),
+	pinned := net.JoinHostPort(ip, port)
+
+	var redirected atomic.Bool
+	var dials atomic.Int32
+	c := &gortsplib.Client{
+		Scheme:       u.Scheme,
+		Host:         u.Host,
+		ReadTimeout:  timeout,
+		WriteTimeout: timeout,
+		DialContext: func(dctx context.Context, network, address string) (net.Conn, error) {
+			// One connection, to the probed address, and none after a
+			// redirect has been seen.
+			if address != addr || redirected.Load() || dials.Add(1) > 1 {
+				return nil, errDialRefused
+			}
+			return (&net.Dialer{}).DialContext(dctx, network, pinned)
+		},
+		OnResponse: func(r *base.Response) {
+			if r != nil && r.StatusCode >= 300 && r.StatusCode <= 399 {
+				redirected.Store(true)
+			}
+		},
+		// gortsplib logs through the standard logger by default, which writes
+		// to stderr; nothing here may write there.
+		OnTransportSwitch: func(error) {},
+		OnPacketsLost:     func(uint64) {},
+		OnDecodeError:     func(error) {},
 	}
-	for i, m := range o.info.GetMedias() {
+	if u.Scheme == "rtsps" {
+		// Verify the certificate against the name in the URL, as gortsplib does
+		// by default, though the TCP connection goes to the pinned IP.
+		c.TLSConfig = &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+	}
+	if err := c.Start(); err != nil {
+		return nil, fmt.Errorf("RTSP start failed: %w", err)
+	}
+	stop := context.AfterFunc(ctx, c.Close)
+	defer func() { stop(); c.Close() }()
+
+	res := &Result{Protocol: "rtsp"}
+	if _, err := c.Options(u); err != nil {
+		if redirected.Load() {
+			return nil, ErrRedirected
+		}
+		if !isStatus(err, base.StatusUnauthorized) {
+			return nil, fmt.Errorf("RTSP options failed: %w", err)
+		}
+	}
+	res.Reachable = true
+
+	desc, _, err := c.Describe(u)
+	if redirected.Load() {
+		return nil, ErrRedirected
+	}
+	if err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) {
+			return nil, fmt.Errorf("RTSP describe failed: %w (%w)", ErrEndedDuringDescribe, err)
+		}
+		return nil, fmt.Errorf("RTSP describe failed: %w", err)
+	}
+	res.DescribeOK = true
+	res.LatencyMs = float64(time.Since(start)) / float64(time.Millisecond)
+	for i, m := range desc.Medias {
 		if i >= MaxTracks {
 			break
 		}
-		tr := Track{Index: m.Index, Type: m.Type, Format: m.Format}
-		if m.Resolution != nil {
-			tr.Width, tr.Height = m.Resolution.Width, m.Resolution.Height
-		}
-		out.Tracks = append(out.Tracks, tr)
+		res.Tracks = append(res.Tracks, classify(i, m))
 	}
-	return Bound(out), nil
+	return res, nil
+}
+
+func isStatus(err error, code base.StatusCode) bool {
+	var bad liberrors.ErrClientBadStatusCode
+	return errors.As(err, &bad) && bad.Code == code
+}
+
+// canonicalAddr is the host:port gortsplib dials for u, with the scheme's
+// default port when the URL has none (gortsplib client.go canonicalAddr).
+func canonicalAddr(u *base.URL) string {
+	port := u.Port()
+	if port == "" {
+		port = "554"
+		if u.Scheme == "rtsps" {
+			port = "322"
+		}
+	}
+	return net.JoinHostPort(u.Hostname(), port)
+}
+
+// resolveOnce returns host as an IP literal, resolving it once if it is a name.
+func resolveOnce(ctx context.Context, host string) (string, error) {
+	if a, err := netip.ParseAddr(host); err == nil {
+		return a.String(), nil
+	}
+	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return "", err
+	}
+	if len(addrs) == 0 {
+		return "", errors.New("no such host")
+	}
+	return addrs[0].String(), nil
+}
+
+// classify reduces one SDP media description to a Track. The first format
+// names the track; resolution is read from the SPS the stream carries in its
+// own SDP, for H.264 and H.265 only, and is left zero when absent or unparsable.
+func classify(idx int, m *description.Media) Track {
+	t := Track{Index: idx, Type: string(m.Type)}
+	if len(m.Formats) == 0 {
+		return t
+	}
+	f := m.Formats[0]
+	t.Format = f.Codec()
+	if m.Type != description.MediaTypeVideo {
+		return t
+	}
+	switch ct := f.(type) {
+	case *format.H264:
+		var sps h264.SPS
+		if len(ct.SPS) > 0 && sps.Unmarshal(ct.SPS) == nil {
+			t.Width, t.Height = sps.Width(), sps.Height()
+		}
+	case *format.H265:
+		var sps h265.SPS
+		if len(ct.SPS) > 0 && sps.Unmarshal(ct.SPS) == nil {
+			t.Width, t.Height = sps.Width(), sps.Height()
+		}
+	}
+	if t.Width <= 0 || t.Height <= 0 {
+		t.Width, t.Height = 0, 0
+	}
+	return t
 }
 
 // Bound returns a copy of r that is safe to hand to an agent: at most
@@ -229,7 +397,7 @@ func secretsOf(rawURL string) []string {
 // sentinels are the error identities downstream classification relies on.
 // They are re-attached by identity, never by carrying the library's error
 // chain, which can hold text derived from the URL.
-var sentinels = []error{rtspeek.ErrInvalidURL, context.DeadlineExceeded, context.Canceled}
+var sentinels = []error{rtspeek.ErrInvalidURL, context.DeadlineExceeded, context.Canceled, ErrEndedDuringDescribe, ErrRedirected}
 
 type probeError struct {
 	msg   string

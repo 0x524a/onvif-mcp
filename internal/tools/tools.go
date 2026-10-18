@@ -40,7 +40,7 @@ type Deps struct {
 	// write tool and the guard refuses everything.
 	Policy *safety.Policy
 	// Prober performs the RTSP handshake for stream.inspect. Nil means the
-	// real prober (probe.NewRTSPeek). It is injectable so tests use a fake or
+	// real prober (probe.NewRTSP). It is injectable so tests use a fake or
 	// an in-process RTSP server. It sees the credentialed URL, so it must be
 	// trusted code; it is not a place to add credential access for other tools.
 	Prober probe.Prober

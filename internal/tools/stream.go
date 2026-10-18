@@ -154,14 +154,14 @@ func trackInfos(r *probe.Result) []TrackInfo {
 
 // RegisterStream registers stream.inspect.
 //
-// rtspeek: DescribeStream, pkg/rtspeek/client.go (v0.2.0), through
-// probe.Prober. This is the only tool that handles camera credentials outside
+// gortsplib v5: Client.Options and Client.Describe, driven by internal/probe
+// (not rtspeek.DescribeStream, which follows redirects), through probe.Prober. This is the only tool that handles camera credentials outside
 // the registry, and the only file allowed to call registry.Entry.PrepareStream
 // or StreamProbe.CredentialedURL (a test enforces both).
 func RegisterStream(srv *mcp.Server, d Deps) {
 	prober := d.Prober
 	if prober == nil {
-		prober = probe.NewRTSPeek()
+		prober = probe.NewRTSP()
 	}
 	GuardedTool(srv, d, safety.RiskRead, &mcp.Tool{
 		Name: "stream.inspect",

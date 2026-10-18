@@ -173,7 +173,7 @@ func TestRefusedConnection(t *testing.T) {
 	}
 	addr := ln.Addr().String()
 	_ = ln.Close()
-	_, err = NewRTSPeek().Describe(context.Background(), probeWithCreds(addr), time.Second)
+	_, err = NewRTSP().Describe(context.Background(), probeWithCreds(addr), time.Second)
 	assertNoLeak(t, err)
 	te := mcperr.FromStreamError(err, "cam", "stream.inspect")
 	if te.Code != mcperr.CodeUnreachable {
@@ -184,7 +184,7 @@ func TestRefusedConnection(t *testing.T) {
 func TestUnreachableHostWithinTimeout(t *testing.T) {
 	// 192.0.2.0/24 is TEST-NET-1: nothing answers.
 	start := time.Now()
-	_, err := NewRTSPeek().Describe(context.Background(), "rtsp://"+testUser+":"+testPass+"@192.0.2.1:554/s", 300*time.Millisecond)
+	_, err := NewRTSP().Describe(context.Background(), "rtsp://"+testUser+":"+testPass+"@192.0.2.1:554/s", 300*time.Millisecond)
 	assertNoLeak(t, err)
 	if d := time.Since(start); d > 2*time.Second {
 		t.Errorf("took %v", d)
@@ -193,7 +193,7 @@ func TestUnreachableHostWithinTimeout(t *testing.T) {
 
 func TestAuthRequiredWithoutCredentials(t *testing.T) {
 	srv := startRaw(t, "401", "")
-	_, err := NewRTSPeek().Describe(context.Background(), "rtsp://"+srv.hostPort()+"/stream", 2*time.Second)
+	_, err := NewRTSP().Describe(context.Background(), "rtsp://"+srv.hostPort()+"/stream", 2*time.Second)
 	assertNoLeak(t, err)
 	te := mcperr.FromStreamError(err, "cam", "stream.inspect")
 	if te.Code != mcperr.CodeAuthFailed {
@@ -203,7 +203,7 @@ func TestAuthRequiredWithoutCredentials(t *testing.T) {
 
 func TestAuthRejectedWithCredentialsDoesNotLeak(t *testing.T) {
 	srv := startRaw(t, "401", "")
-	_, err := NewRTSPeek().Describe(context.Background(), probeWithCreds(srv.hostPort()), 2*time.Second)
+	_, err := NewRTSP().Describe(context.Background(), probeWithCreds(srv.hostPort()), 2*time.Second)
 	assertNoLeak(t, err)
 	if te := mcperr.FromStreamError(err, "cam", "stream.inspect"); te.Code != mcperr.CodeAuthFailed {
 		t.Errorf("code = %s (%v), want auth_failed", te.Code, err)
@@ -213,7 +213,7 @@ func TestAuthRejectedWithCredentialsDoesNotLeak(t *testing.T) {
 func TestSilentServerHonoursTimeout(t *testing.T) {
 	srv := startRaw(t, "silent", "")
 	start := time.Now()
-	_, err := NewRTSPeek().Describe(context.Background(), probeWithCreds(srv.hostPort()), 400*time.Millisecond)
+	_, err := NewRTSP().Describe(context.Background(), probeWithCreds(srv.hostPort()), 400*time.Millisecond)
 	d := time.Since(start)
 	assertNoLeak(t, err)
 	if d > 400*time.Millisecond+time.Second {
@@ -230,7 +230,7 @@ func TestSilentServerHonoursTimeout(t *testing.T) {
 func TestHangingDescribeHonoursTimeout(t *testing.T) {
 	srv := startRaw(t, "hang", "")
 	start := time.Now()
-	_, err := NewRTSPeek().Describe(context.Background(), probeWithCreds(srv.hostPort()), 400*time.Millisecond)
+	_, err := NewRTSP().Describe(context.Background(), probeWithCreds(srv.hostPort()), 400*time.Millisecond)
 	if d := time.Since(start); d > 1500*time.Millisecond {
 		t.Errorf("returned after %v", d)
 	}
@@ -242,7 +242,7 @@ func TestContextCancellationReturnsPromptly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(150*time.Millisecond, cancel)
 	start := time.Now()
-	_, err := NewRTSPeek().Describe(ctx, probeWithCreds(srv.hostPort()), 30*time.Second)
+	_, err := NewRTSP().Describe(ctx, probeWithCreds(srv.hostPort()), 30*time.Second)
 	if d := time.Since(start); d > 1500*time.Millisecond {
 		t.Errorf("cancel took %v to honour", d)
 	}
@@ -256,26 +256,26 @@ func TestAlreadyCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	start := time.Now()
-	_, err := NewRTSPeek().Describe(ctx, "rtsp://127.0.0.1:1/s", 5*time.Second)
+	_, err := NewRTSP().Describe(ctx, "rtsp://127.0.0.1:1/s", 5*time.Second)
 	if err == nil || time.Since(start) > time.Second {
 		t.Errorf("err=%v after %v", err, time.Since(start))
 	}
 }
 
 func TestInvalidURLKeepsItsClassAndLeaksNothing(t *testing.T) {
-	_, err := NewRTSPeek().Describe(context.Background(), "http://"+testUser+":"+testPass+"@host/x", time.Second)
+	_, err := NewRTSP().Describe(context.Background(), "http://"+testUser+":"+testPass+"@host/x", time.Second)
 	assertNoLeak(t, err)
 	if te := mcperr.FromStreamError(err, "cam", "stream.inspect"); te.Code != mcperr.CodeInvalidArgument {
 		t.Errorf("code = %s (%v), want invalid_argument", te.Code, err)
 	}
-	_, err = NewRTSPeek().Describe(context.Background(), "rtsp://"+testUser+":"+testPass+"@[bad/x", time.Second)
+	_, err = NewRTSP().Describe(context.Background(), "rtsp://"+testUser+":"+testPass+"@[bad/x", time.Second)
 	assertNoLeak(t, err)
 }
 
 func TestSuccessWithVideoTrack(t *testing.T) {
 	addr, stop := startGortsplib(t)
 	defer stop()
-	res, err := NewRTSPeek().Describe(context.Background(), "rtsp://"+addr+"/test", 3*time.Second)
+	res, err := NewRTSP().Describe(context.Background(), "rtsp://"+addr+"/test", 3*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestGarbageSDPYieldsNoPanicAndNoLeak(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := startRaw(t, "sdp", sdp)
-			res, err := NewRTSPeek().Describe(context.Background(), probeWithCreds(srv.hostPort()), 2*time.Second)
+			res, err := NewRTSP().Describe(context.Background(), probeWithCreds(srv.hostPort()), 2*time.Second)
 			if err != nil {
 				assertNoLeak(t, err)
 				return
@@ -349,7 +349,7 @@ func TestGarbageSDPYieldsNoPanicAndNoLeak(t *testing.T) {
 
 func TestHostileSDPTrackCountIsCapped(t *testing.T) {
 	srv := startRaw(t, "sdp", sdpWithVideoTracks(300))
-	res, err := NewRTSPeek().Describe(context.Background(), probeWithCreds(srv.hostPort()), 3*time.Second)
+	res, err := NewRTSP().Describe(context.Background(), probeWithCreds(srv.hostPort()), 3*time.Second)
 	if err != nil {
 		assertNoLeak(t, err)
 		t.Skipf("rtspeek rejected the hostile SDP outright (acceptable): %v", err)
@@ -411,7 +411,7 @@ func TestNothingIsWrittenToStdoutOrStderr(t *testing.T) {
 	restore := func() { os.Stdout, os.Stderr = origOut, origErr }
 	defer restore()
 
-	p := NewRTSPeek()
+	p := NewRTSP()
 	// A context that asks for rtspeek's debug trace must not enable logging.
 	ctx := rtspeekDebugContext(context.Background())
 	_, _ = p.Describe(ctx, probeWithCreds(srv.hostPort()), time.Second)
@@ -426,5 +426,28 @@ func TestNothingIsWrittenToStdoutOrStderr(t *testing.T) {
 		if len(b) != 0 {
 			t.Errorf("%s received %d bytes: %q", name, len(b), b)
 		}
+	}
+}
+
+func TestResolutionComesFromTheSPS(t *testing.T) {
+	// A 1920x1080 High profile SPS.
+	sps := []byte{0x67, 0x64, 0x00, 0x28, 0xac, 0xd9, 0x40, 0x78, 0x02, 0x27, 0xe5, 0xc0, 0x44, 0x00, 0x00, 0x03,
+		0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x60, 0xc6, 0x58}
+	tr := classify(0, &description.Media{Type: description.MediaTypeVideo, Formats: []format.Format{
+		&format.H264{PayloadTyp: 96, SPS: sps, PPS: []byte{0x68, 0xe9, 0x3b, 0x2c, 0x8b}}}})
+	if tr.Format != "H264" || tr.Width != 1920 || tr.Height != 1080 {
+		t.Errorf("track = %+v, want H264 1920x1080", tr)
+	}
+	tr = classify(1, &description.Media{Type: description.MediaTypeVideo, Formats: []format.Format{
+		&format.H264{PayloadTyp: 96, SPS: []byte{0x67, 0x01}}}})
+	if tr.Width != 0 || tr.Height != 0 {
+		t.Errorf("unparsable SPS gave %dx%d, want unknown", tr.Width, tr.Height)
+	}
+	au := classify(2, &description.Media{Type: description.MediaTypeAudio, Formats: []format.Format{&format.G711{MULaw: false}}})
+	if au.Type != "audio" || au.Format == "" || au.Width != 0 {
+		t.Errorf("audio track = %+v", au)
+	}
+	if got := classify(3, &description.Media{Type: description.MediaTypeApplication}); got.Type != "application" || got.Format != "" {
+		t.Errorf("no-format track = %+v", got)
 	}
 }
