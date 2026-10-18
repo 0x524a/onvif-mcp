@@ -191,3 +191,13 @@ func faultFixture(t *testing.T, reason string) *httptest.Server {
 	t.Cleanup(srv.Close)
 	return srv
 }
+
+// wireOf marshals v for substring checks.
+func wireOf(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}

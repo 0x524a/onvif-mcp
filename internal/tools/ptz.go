@@ -191,6 +191,23 @@ func configTokenFor(ps []*onvif.Profile, profile string) string {
 	return p.PTZConfiguration.Token
 }
 
+// limitsOfProfile reads the movement limits of the named profile's PTZ
+// configuration (onvif-go ptz.go: (*Client).GetConfiguration, which returns the
+// same PTZConfiguration type as GetConfigurations). Failing to read them is
+// not a failure of the caller, so any error yields nil, as does a camera that
+// reports no limits.
+func limitsOfProfile(ctx context.Context, c *onvif.Client, ps []*onvif.Profile, profile string) *Limits {
+	tok := configTokenFor(ps, profile)
+	if tok == "" {
+		return nil
+	}
+	cfg, err := c.GetConfiguration(ctx, tok)
+	if err != nil {
+		return nil
+	}
+	return limitsFor(cfg)
+}
+
 // RegisterPTZReads registers ptz.status and ptz.presets.
 func RegisterPTZReads(srv *mcp.Server, d Deps) {
 	// onvif-go: (*Client).GetStatus, ptz.go.
@@ -248,11 +265,7 @@ func RegisterPTZReads(srv *mcp.Server, d Deps) {
 		// on the profile's PTZ configuration token. Failing to read them is not
 		// a failure of this tool: they are reported when available.
 		if ps, perr := c.GetProfiles(ctx); perr == nil {
-			if tok := configTokenFor(ps, in.Profile); tok != "" {
-				if cfg, cerr := c.GetConfiguration(ctx, tok); cerr == nil {
-					out.Limits = limitsFor(cfg)
-				}
-			}
+			out.Limits = limitsOfProfile(ctx, c, ps, in.Profile)
 		}
 		msg := fmt.Sprintf("%d preset(s)", out.Total)
 		if out.Truncated {

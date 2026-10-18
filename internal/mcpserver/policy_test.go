@@ -92,21 +92,78 @@ func TestNilPolicyFailsClosedAndStillServesTheResource(t *testing.T) {
 	}
 }
 
-// No production write tool is registered in this phase, with control on or off.
-func TestNoWriteToolIsRegisteredYet(t *testing.T) {
-	for _, enabled := range []bool{false, true} {
-		cs := policyServer(t, func(r *registry.Registry) *safety.Policy { return testPolicy(r, enabled) })
-		res, err := cs.ListTools(context.Background(), nil)
-		if err != nil {
-			t.Fatal(err)
+// ptz.goto_preset is the one write tool. With control off an agent cannot see
+// it in tools/list, but the policy resource names it and explains the gate.
+func TestWriteToolIsHiddenWithControlOffButNamedByThePolicy(t *testing.T) {
+	cs := policyServer(t, func(r *registry.Registry) *safety.Policy { return testPolicy(r, false) })
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range res.Tools {
+		if tool.Name == "ptz.goto_preset" {
+			t.Fatal("ptz.goto_preset must not be listed while control is off")
 		}
-		for _, tool := range res.Tools {
-			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
-				t.Errorf("control=%v: %s is not read-only", enabled, tool.Name)
-			}
+		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
+			t.Errorf("%s is not read-only", tool.Name)
 		}
-		if m := readPolicy(t, cs); len(m["gated_write_tools"].([]any)) != 0 {
-			t.Errorf("gated tools = %v", m["gated_write_tools"])
+	}
+	m := readPolicy(t, cs)
+	gated, _ := m["gated_write_tools"].([]any)
+	if len(gated) != 1 || gated[0] != "ptz.goto_preset" {
+		t.Fatalf("gated_write_tools = %v", m["gated_write_tools"])
+	}
+	for _, k := range []string{"explanation", "how_to_enable"} {
+		txt, _ := m[k].(string)
+		if strings.Contains(txt, "registers no write tool") || strings.Contains(txt, "changes nothing") {
+			t.Errorf("%s still claims there is no write tool: %q", k, txt)
 		}
+	}
+	if how, _ := m["how_to_enable"].(string); !strings.Contains(how, "--enable-control") {
+		t.Errorf("how_to_enable = %q", how)
+	}
+}
+
+func TestWriteToolIsListedWithControlOnAndWritableCamerasAreReported(t *testing.T) {
+	cs := policyServer(t, func(r *registry.Registry) *safety.Policy { return testPolicy(r, true) })
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var writes []string
+	for _, tool := range res.Tools {
+		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
+			writes = append(writes, tool.Name)
+		}
+	}
+	if len(writes) != 1 || writes[0] != "ptz.goto_preset" {
+		t.Fatalf("non-read-only tools = %v, want exactly ptz.goto_preset", writes)
+	}
+	m := readPolicy(t, cs)
+	if gated, _ := m["gated_write_tools"].([]any); len(gated) != 1 || gated[0] != "ptz.goto_preset" {
+		t.Errorf("gated_write_tools = %v", m["gated_write_tools"])
+	}
+	writable := map[string]bool{}
+	for _, c := range m["cameras"].([]any) {
+		cm := c.(map[string]any)
+		writable[cm["id"].(string)] = cm["writable"].(bool)
+	}
+	if !writable["cam-a"] || writable["cam-fixed"] {
+		t.Errorf("writable = %v", writable)
+	}
+}
+
+// A string dry_run is a schema violation, not "false": the middleware answers
+// with the invalid_argument envelope and the handler never runs.
+func TestWriteToolRejectsAStringDryRunWithTheEnvelope(t *testing.T) {
+	cs := policyServer(t, func(r *registry.Registry) *safety.Policy { return testPolicy(r, true) })
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "ptz.goto_preset",
+		Arguments: map[string]any{"camera": "cam-a", "profile": "p", "preset": "q", "dry_run": "false"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, _ := res.StructuredContent.(map[string]any)["error"].(map[string]any)
+	if !res.IsError || e["code"] != "invalid_argument" {
+		t.Fatalf("result = %+v", res)
 	}
 }

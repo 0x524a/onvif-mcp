@@ -209,9 +209,9 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 	tools.RegisterPTZReads(srv, deps)
 	tools.RegisterCamera(srv, deps)
 
-	// No production write tool is registered yet. When one is, it goes through
-	// tools.GuardedTool with deps, which is what keeps it out of tools/list
-	// while control is disabled.
+	// The only write tool. It goes through tools.GuardedTool, which keeps it
+	// out of tools/list while control is disabled and lists it in the policy.
+	tools.RegisterPTZWrites(srv, deps)
 
 	safety.RegisterPolicyResource(srv, policy, func() []safety.CameraGrant {
 		list := reg.List()
@@ -222,6 +222,6 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 		return grants
 	})
 
-	log.Debug("tools registered", "count", 8)
+	log.Debug("tools registered", "count", 9)
 	return srv
 }
