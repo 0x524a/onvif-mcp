@@ -2,7 +2,9 @@ package safety
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -94,5 +96,35 @@ func TestPolicyResourceCamerasNeverNull(t *testing.T) {
 	}
 	if got := res.Contents[0].Text; !strings.Contains(got, `"cameras": []`) {
 		t.Fatalf("cameras must be [] not null: %s", got)
+	}
+}
+
+// Race detector tests: the gated set and the target slot are shared between
+// the goroutines of concurrent calls.
+func TestGatedSetIsSafeForConcurrentUse(t *testing.T) {
+	p := &Policy{}
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(2)
+		go func(i int) { defer wg.Done(); p.NoteGated(fmt.Sprintf("tool.%d", i%4)) }(i)
+		go func() { defer wg.Done(); _ = p.GatedTools() }()
+	}
+	wg.Wait()
+	if got := p.GatedTools(); len(got) != 4 {
+		t.Errorf("gated = %v", got)
+	}
+}
+
+func TestTargetSlotIsSafeForConcurrentUse(t *testing.T) {
+	ctx, slot := WithTargetSlot(context.Background())
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); NoteTarget(ctx, "p1") }()
+		go func() { defer wg.Done(); _ = slot.Get() }()
+	}
+	wg.Wait()
+	if slot.Get() != "p1" {
+		t.Errorf("target = %q", slot.Get())
 	}
 }

@@ -495,6 +495,7 @@ func TestDeviceKeyNormalisesTheEndpoint(t *testing.T) {
 		{"http://cam.example./x", "http://CAM.example/x"},
 		{"http://[2001:db8::1]:80/x", "http://[2001:DB8:0::1]/x"},
 		{"http://192.0.2.1/x?token=a", "http://192.0.2.1/x#frag"},
+		{"http://192.0.2.1:8080/x", "https://192.0.2.1:8080/x"},
 	}
 	for _, p := range same {
 		if a, b := DeviceKey(p[0]), DeviceKey(p[1]); a != b || a == "" {
@@ -521,5 +522,15 @@ func TestEntryDeviceKeyIsTheNormalisedEndpoint(t *testing.T) {
 	b, _ := r.Get("b")
 	if a.DeviceKey() == "" || a.DeviceKey() != b.DeviceKey() {
 		t.Errorf("keys %q %q", a.DeviceKey(), b.DeviceKey())
+	}
+}
+
+func TestSensitiveLookingIDKeepsTheCauseOfAClientConstructionError(t *testing.T) {
+	e, _ := New(&config.Config{Cameras: map[string]*config.Camera{
+		"pass-cam": {ID: "pass-cam", Endpoint: "http://a b/"},
+	}}).Get("pass-cam")
+	_, err := e.Client(context.Background())
+	if err == nil || strings.Contains(err.Error(), "REDACTED") || !strings.Contains(err.Error(), "invalid endpoint") {
+		t.Errorf("err = %v, want the cause intact", err)
 	}
 }

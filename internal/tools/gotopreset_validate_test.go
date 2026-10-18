@@ -144,3 +144,29 @@ func TestGotoPresetSuccessNoteSaysHTTPSuccessAndPointsAtStatus(t *testing.T) {
 		t.Errorf("note = %q", n)
 	}
 }
+
+// Each axis counts: presets that differ in only one of pan, tilt or zoom are
+// still ambiguous.
+func TestGotoPresetDuplicateTokenDifferingInOneAxisIsRefused(t *testing.T) {
+	pos := func(x, y, z string) string {
+		return `<tptz:Preset token="p1"><tt:Name>A</tt:Name><tt:PTZPosition><tt:PanTilt x="` + x + `" y="` + y +
+			`"/><tt:Zoom x="` + z + `"/></tt:PTZPosition></tptz:Preset>`
+	}
+	for name, presets := range map[string]string{
+		"pan":  pos("0.1", "0.2", "0.3") + pos("0.9", "0.2", "0.3"),
+		"tilt": pos("0.1", "0.2", "0.3") + pos("0.1", "0.9", "0.3"),
+		"zoom": pos("0.1", "0.2", "0.3") + pos("0.1", "0.2", "0.9"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fx := newPresetFixture(t, presetFixtureOpts{presets: presets})
+			cs := fx.rig(t, true)
+			res := call(t, cs, gotoTool, map[string]any{"camera": "fx", "profile": "prof", "preset": "p1", "dry_run": false})
+			if code, _ := errCode(t, res); code != "device_fault" {
+				t.Errorf("code = %q: %s", code, wire(t, res))
+			}
+			if fx.gotoCalls.Load() != 0 {
+				t.Error("GotoPreset was sent")
+			}
+		})
+	}
+}

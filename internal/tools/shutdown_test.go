@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -136,5 +137,49 @@ func TestWriteIsNotStartedWhenShutdownBeginsDuringEvaluation(t *testing.T) {
 	last := recs[len(recs)-1]
 	if last["outcome"] != "cancelled" || last["executed"] != false {
 		t.Errorf("audit = %v", last)
+	}
+}
+
+// A call that arrives after shutdown began is stopped before it reaches the
+// policy: even one that the policy would refuse is reported as cancelled, and
+// no rate budget is touched.
+func TestCancelledCallIsStoppedBeforeThePolicyIsConsulted(t *testing.T) {
+	reg := registry.New(&config.Config{Cameras: map[string]*config.Camera{
+		"cam-b": {ID: "cam-b", Endpoint: "http://192.0.2.1/onvif/device_service"}, // no control grant
+	}})
+	policy := safety.NewPolicy(safety.PolicyOptions{ControlEnabled: true, Cameras: reg, Interval: time.Hour, Log: quietLog()})
+	base, cancelBase := context.WithCancel(context.Background())
+	cancelBase()
+	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	GuardedTool(srv, Deps{Reg: reg, Log: quietLog(), Base: base, Policy: policy}, safety.RiskWrite,
+		&mcp.Tool{Name: "test.nudge", Description: "x"}, nudgeNoop, nudgeNoop)
+	cs := connectTo(t, srv)
+	for _, cam := range []string{"cam-b", "no-such-camera"} {
+		res := call(t, cs, "test.nudge", map[string]any{"camera": cam, "dry_run": false})
+		if code, _ := errCode(t, res); code != "internal" || !strings.Contains(wire(t, res), "cancelled before it started") {
+			t.Errorf("%s: code = %q: %s", cam, code, wire(t, res))
+		}
+	}
+}
+
+// The budget Evaluate took is handed back when the call is cancelled before it
+// can send anything.
+func TestBudgetIsReturnedWhenCancelledDuringEvaluation(t *testing.T) {
+	reg := registry.New(&config.Config{Cameras: map[string]*config.Camera{
+		"cam-a": {ID: "cam-a", Endpoint: "http://192.0.2.1/onvif/device_service", Control: true},
+	}})
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+	policy := safety.NewPolicy(safety.PolicyOptions{
+		ControlEnabled: true, Cameras: cancelOnGet{reg, cancelReq}, Interval: time.Hour, Burst: 1, Log: quietLog(),
+	})
+	h := guardedHandler(Deps{Reg: reg, Policy: policy}, "test.nudge", nudgeNoop, nudgeNoop)
+	res, _, _ := h(reqCtx, nil, nudgeIn{WriteBase: safety.WriteBase{Camera: "cam-a", DryRun: new(bool)}})
+	if res == nil || !res.IsError {
+		t.Fatalf("res = %v, want the cancelled error", res)
+	}
+	e, _ := reg.Get("cam-a")
+	if ok, _ := policy.Limiter.Allow(e.DeviceKey()); !ok {
+		t.Error("the rate budget was not returned after a cancellation that sent nothing")
 	}
 }
