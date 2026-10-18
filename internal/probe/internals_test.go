@@ -142,6 +142,27 @@ func TestSecretsOfShortUsernameIsNotRegistered(t *testing.T) {
 	}
 }
 
+// A one or two character password must not be replaced everywhere in error
+// text, where it would garble unrelated words (the registry applies the same
+// floor).
+func TestSecretsOfShortPasswordIsNotRegistered(t *testing.T) {
+	for _, u := range []string{"rtsp://operator:a@h/s", "rtsp://operator:ab@h/s"} {
+		for _, s := range secretsOf(u) {
+			if len(s) < 3 {
+				t.Errorf("%s registers %q", u, s)
+			}
+		}
+	}
+	ctx := context.Background()
+	msg := wrapError(ctx, ctx, errors.New("bad status: not found"), secretsOf("rtsp://operator:a@h/s")).Error()
+	if strings.Contains(msg, "REDACTED") {
+		t.Errorf("unrelated words garbled: %q", msg)
+	}
+	if got := secretsOf("rtsp://operator:abc@h/s"); len(got) != 2 || got[0] != "abc" {
+		t.Errorf("secrets = %v", got)
+	}
+}
+
 func TestSuccessReportsIndexesLatencyAndFlags(t *testing.T) {
 	srv := startRaw(t, "sdp", sdpWithVideoTracks(3))
 	res, err := NewRTSP().Describe(context.Background(), probeWithCreds(srv.hostPort()), 3*time.Second)

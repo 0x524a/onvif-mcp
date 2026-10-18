@@ -413,7 +413,7 @@ func secretsOf(rawURL string) []string {
 		return nil
 	}
 	var s []string
-	if p, ok := u.User.Password(); ok && p != "" {
+	if p, ok := u.User.Password(); ok && len(p) >= 3 { // same floor as registry scrubForms
 		s = append(s, p)
 	}
 	if n := u.User.Username(); len(n) >= 3 {
