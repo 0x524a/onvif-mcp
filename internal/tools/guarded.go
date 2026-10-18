@@ -142,14 +142,13 @@ func claimName(srv *mcp.Server, name string) {
 const sentUnknownHint = "The command was sent to the camera before this failed, so it may or may not have been executed and the camera's state is unknown; check it with a read tool (for PTZ, ptz.status) before repeating the call."
 
 // unknownStateAfterSend reports whether a failure of this class after a real
-// write leaves the outcome unknown: a SOAP fault, a timeout, or a transport
-// error can each arrive after the camera acted.
+// write leaves the outcome unknown. Every class does except a policy refusal,
+// which is produced before anything can be sent: a SOAP fault, a timeout, a
+// transport error, and equally a malformed or empty reply or a camera that
+// answers 500 with a web page can each arrive after the camera acted. The
+// camera's reply is not evidence, so the class is not trusted either way.
 func unknownStateAfterSend(c mcperr.Code) bool {
-	switch c {
-	case mcperr.CodeDeviceFault, mcperr.CodeTimeout, mcperr.CodeUnreachable:
-		return true
-	}
-	return false
+	return c != mcperr.CodeBlockedByPolicy
 }
 
 // cancelled audits and reports a call that was stopped before it started.
