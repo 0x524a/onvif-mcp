@@ -601,9 +601,10 @@ func TestInspectRefusesUnusableSchemesAndPorts(t *testing.T) {
 }
 
 func TestInspectStripsCameraUserinfoFromSameHostURI(t *testing.T) {
-	srv := startRTSP(t, "127.0.0.1", canaryUser, "zqxv-right-pass")
+	const rightPass = "zqxv-right-pass" //nolint:gosec // fixed test secret, not a credential
+	srv := startRTSP(t, "127.0.0.1", canaryUser, rightPass)
 	uri := "rtsp://attacker:their-pass@127.0.0.1:" + portOf(srv.addr) + "/s"
-	env := streamSession(t, uri, config.Camera{Password: "zqxv-right-pass"}, probe.NewRTSP())
+	env := streamSession(t, uri, config.Camera{Password: rightPass}, probe.NewRTSP())
 	res := inspect(t, env.cs, nil)
 	d := dataMap(t, res)
 	if d["authenticated"] != true {
