@@ -208,3 +208,31 @@ func TestPolicyResourceCamerasReportWhetherTheyAreWritableNow(t *testing.T) {
 		}
 	}
 }
+
+// Once control is enabled, the policy must not tell an agent to restart with
+// the flag it already has; it names what is still missing, per camera.
+func TestPolicyResourceWhenEnabledNamesWhatIsStillMissing(t *testing.T) {
+	p, _, _ := newPolicy(true)
+	p.NoteGated("some.write_tool")
+	grants := []CameraGrant{{ID: "cam-a", ControlAllowed: true}, {ID: "cam-b", ControlAllowed: false}}
+	b, _ := readPolicyWith(t, p, grants)
+	if strings.Contains(b.HowToEnable, "--enable-control") {
+		t.Errorf("how_to_enable asks for a flag that is already set: %q", b.HowToEnable)
+	}
+	for _, want := range []string{"cam-b", `"control": true`, "restart"} {
+		if !strings.Contains(b.HowToEnable, want) {
+			t.Errorf("how_to_enable = %q, want %q", b.HowToEnable, want)
+		}
+	}
+	if strings.Contains(b.HowToEnable, "cam-a") {
+		t.Errorf("how_to_enable names a camera that is already writable: %q", b.HowToEnable)
+	}
+	if strings.Contains(b.Why, "off unless") {
+		t.Errorf("why says write tools are off, but control is enabled: %q", b.Why)
+	}
+
+	all, _ := readPolicyWith(t, p, []CameraGrant{{ID: "cam-a", ControlAllowed: true}})
+	if !strings.Contains(all.HowToEnable, "nothing more") || strings.Contains(all.HowToEnable, "restart") {
+		t.Errorf("every camera is writable, so nothing is missing: %q", all.HowToEnable)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -46,6 +47,12 @@ func (p *Policy) rateLimitText() string {
 const whyText = "write tools physically move or reconfigure a real camera; an agent that loops on them " +
 	"can wear out or wedge the mechanism, so they are off unless an operator opts in"
 
+// whyEnabledText replaces whyText once the server has control enabled: the
+// server-wide opt-in is done, and each camera still needs its own.
+const whyEnabledText = "write tools physically move or reconfigure a real camera; an agent that loops on them " +
+	"can wear out or wedge the mechanism, so the operator has enabled control on this server and each camera " +
+	"must also opt in individually"
+
 func (p *Policy) document(cams []CameraGrant) policyDoc {
 	enabled := p != nil && p.ControlEnabled
 	mode := "read-only"
@@ -66,6 +73,23 @@ func (p *Policy) document(cams []CameraGrant) policyDoc {
 		"true, so a caller must pass dry_run false to change a camera, and only cameras with " +
 		"control_allowed true accept it. control_allowed is a camera's own opt-in and only takes " +
 		"effect when control_enabled is true; writable says whether a camera can be controlled now"
+	why := whyText
+	if enabled {
+		why = whyEnabledText
+		var missing []string
+		for _, c := range grants {
+			if !c.ControlAllowed {
+				missing = append(missing, c.ID)
+			}
+		}
+		if len(missing) == 0 {
+			howTo = "control is enabled on this server and every configured camera allows it; nothing more is needed"
+		} else {
+			howTo = "control is already enabled on this server; cameras that have not " +
+				"opted in (" + strings.Join(missing, ", ") + ") need an operator to set \"control\": true on " +
+				"their config entry and restart the server"
+		}
+	}
 	if len(gated) == 0 {
 		howTo = "nothing to enable: this build registers no write tool, so --enable-control and " +
 			"\"control\": true currently change nothing"
@@ -81,7 +105,7 @@ func (p *Policy) document(cams []CameraGrant) policyDoc {
 		HowToEnable:        howTo,
 		DryRunDefault:      true,
 		Explanation:        explanation,
-		Why:                whyText,
+		Why:                why,
 	}
 }
 
