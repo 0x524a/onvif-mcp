@@ -202,7 +202,8 @@ func (p *Policy) Evaluate(camera, tool string, dryRun bool) Decision {
 			"no rate limiter is configured, so movement is refused", nil, misconfiguredHint), ReasonNoRateLimiter)
 	}
 	key := entry.DeviceKey()
-	if ok, after := p.Limiter.Allow(key); !ok {
+	ok, after, grant := p.Limiter.AllowGrant(key)
+	if !ok {
 		// Allow never reports a refusal with a wait under 1ns, so rounding up
 		// always yields at least one second.
 		secs := int(math.Ceil(after.Seconds()))
@@ -210,7 +211,7 @@ func (p *Policy) Evaluate(camera, tool string, dryRun bool) Decision {
 			"movement is rate limited to protect the camera's mechanism", &secs,
 			"wait retry_after_seconds, then repeat the call"), ReasonRateLimited)
 	}
-	return Decision{Refund: func() { p.Limiter.Refund(key) }}
+	return Decision{Refund: func() { p.Limiter.RefundGrant(key, grant) }}
 }
 
 // misconfiguredHint is for the fail-closed refusals that only a broken server

@@ -40,6 +40,9 @@ type Limiter struct {
 type bucket struct {
 	tokens float64
 	last   time.Time
+	// grants counts tokens handed out, so a refund can tell whether anyone
+	// else has been granted one since.
+	grants uint64
 }
 
 // LimiterOption customises a Limiter.
@@ -109,6 +112,13 @@ func (l *Limiter) Burst() int { return int(l.burst) }
 // Allow consumes a token for key. On refusal it reports how long to wait.
 // It is safe for concurrent use.
 func (l *Limiter) Allow(key string) (bool, time.Duration) {
+	ok, wait, _ := l.AllowGrant(key)
+	return ok, wait
+}
+
+// AllowGrant is Allow that also returns the grant number of the token it
+// consumed, for RefundGrant. The number is 0 on refusal.
+func (l *Limiter) AllowGrant(key string) (bool, time.Duration, uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -120,7 +130,7 @@ func (l *Limiter) Allow(key string) (bool, time.Duration) {
 		}
 		if len(l.buckets) >= l.maxKeys {
 			// Fail closed: an unbounded map is worse than a refused move.
-			return false, l.interval
+			return false, l.interval, 0
 		}
 		b = &bucket{tokens: l.burst, last: now}
 		l.buckets[key] = b
@@ -133,14 +143,15 @@ func (l *Limiter) Allow(key string) (bool, time.Duration) {
 
 	if b.tokens >= 1 {
 		b.tokens--
-		return true, 0
+		b.grants++
+		return true, 0, b.grants
 	}
 	missing := 1 - b.tokens
 	wait := time.Duration(missing * float64(l.interval))
 	if wait < time.Nanosecond {
 		wait = time.Nanosecond
 	}
-	return false, wait
+	return false, wait, 0
 }
 
 // Refund returns the token a refused-to-send call took, for a call that ended
@@ -151,6 +162,10 @@ func (l *Limiter) Allow(key string) (bool, time.Duration) {
 func (l *Limiter) Refund(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.refundLocked(key)
+}
+
+func (l *Limiter) refundLocked(key string) {
 	b, ok := l.buckets[key]
 	if !ok {
 		return
@@ -162,6 +177,18 @@ func (l *Limiter) Refund(key string) {
 	}
 	if now.After(b.last) {
 		b.last = now
+	}
+}
+
+// RefundGrant is Refund for the grant numbered grant, and does nothing if any
+// later grant has been handed out for the key. Without that check a slow call
+// whose bucket refilled while it ran would, on refund, add a second token on
+// top of the refilled one, and two real moves could land inside one interval.
+func (l *Limiter) RefundGrant(key string, grant uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if b, ok := l.buckets[key]; ok && b.grants == grant {
+		l.refundLocked(key)
 	}
 }
 
