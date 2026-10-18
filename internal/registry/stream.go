@@ -1,12 +1,14 @@
 package registry
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -61,6 +63,8 @@ type streamProbe struct {
 	authenticated bool
 	// forms are literal strings to remove from any text, longest first.
 	forms []string
+	// ci matches the password, and its escaped form, in any letter case.
+	ci *regexp.Regexp
 }
 
 const streamMark = "registry.StreamProbe{REDACTED}"
@@ -113,6 +117,9 @@ func (s StreamProbe) Scrub(text string) string {
 	if s.p != nil {
 		for _, f := range s.p.forms {
 			text = strings.ReplaceAll(text, f, "REDACTED")
+		}
+		if s.p.ci != nil {
+			text = s.p.ci.ReplaceAllLiteralString(text, "REDACTED")
 		}
 	}
 	return redact.Scrub(text)
@@ -197,6 +204,7 @@ func (e Entry) PrepareStream(rawURI string) (StreamProbe, error) {
 			return StreamProbe{}, malformed
 		}
 		sp.forms = scrubForms(cam.Username, cam.Password, sp.target)
+		sp.ci = caseInsensitiveForms(cam.Username, cam.Password)
 		// Cover the password everywhere, including prose in later errors.
 		redact.RegisterSecret(cam.Password)
 	}
@@ -217,6 +225,17 @@ func scrubForms(user, pass, target string) []string {
 				set[f] = struct{}{}
 			}
 		}
+		// A server can reflect the Basic payload, or the password alone, in
+		// base64. Cover both alphabets, with and without padding.
+		raws := []string{user + ":" + pass}
+		if len(pass) >= 3 {
+			raws = append(raws, pass)
+		}
+		for _, raw := range raws {
+			for _, e := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+				set[e.EncodeToString([]byte(raw))] = struct{}{}
+			}
+		}
 	}
 	out := make([]string, 0, len(set))
 	for f := range set {
@@ -231,6 +250,27 @@ func scrubForms(user, pass, target string) []string {
 		}
 	}
 	return out
+}
+
+// caseInsensitiveForms returns a matcher for the password in any letter case
+// (so "SECRET" and "secret" are removed when "Secret" is configured), raw and
+// userinfo-escaped. It is nil when the password is shorter than three bytes,
+// which would shred ordinary text.
+func caseInsensitiveForms(user, pass string) *regexp.Regexp {
+	if len(pass) < 3 {
+		return nil
+	}
+	ui := url.UserPassword(user, pass).String()
+	enc := ui[strings.IndexByte(ui, ':')+1:]
+	alts := []string{regexp.QuoteMeta(pass)}
+	if enc != pass {
+		alts = append(alts, regexp.QuoteMeta(enc))
+	}
+	re, err := regexp.Compile("(?i)" + strings.Join(alts, "|"))
+	if err != nil {
+		return nil
+	}
+	return re
 }
 
 // neverProbed reports whether host is a target onvif-mcp refuses to probe even

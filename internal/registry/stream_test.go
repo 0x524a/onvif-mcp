@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -233,5 +234,31 @@ func TestStreamProbeScrubRemovesEveryFormOfTheSecret(t *testing.T) {
 		if strings.Contains(out, nastyPass) || strings.Contains(out, "p%40ss") || strings.Contains(out, u) {
 			t.Errorf("Scrub(%q) = %q", s, out)
 		}
+	}
+}
+
+func TestStreamProbeScrubRemovesEncodedAndCasedEchoes(t *testing.T) {
+	const pw = "zqxv-MixedCase-Pw9" //nolint:gosec // fixed test secret, not a credential
+	e := streamEntry(config.Camera{Username: "operator", Password: pw})
+	sp, err := e.PrepareStream("rtsp://192.0.2.10/s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var echoes []string
+	for _, raw := range []string{"operator:" + pw, pw} {
+		for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+			echoes = append(echoes, enc.EncodeToString([]byte(raw)))
+		}
+	}
+	echoes = append(echoes, strings.ToLower(pw), strings.ToUpper(pw), "zqXV-mixedcase-PW9")
+	for _, echo := range echoes {
+		for _, text := range []string{"bad status code: 404 (" + echo + ")", "x " + echo + " y"} {
+			if out := sp.Scrub(text); strings.Contains(out, echo) {
+				t.Errorf("Scrub(%q) = %q still holds the echo", text, out)
+			}
+		}
+	}
+	if out := sp.Scrub("RTSP describe failed: bad status code: 404 (Not Found)"); !strings.Contains(out, "Not Found") {
+		t.Errorf("ordinary status text was damaged: %q", out)
 	}
 }
