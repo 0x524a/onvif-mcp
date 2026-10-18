@@ -75,9 +75,50 @@ usage error such as an unknown flag or a missing `-config`.
 
 ## Tools
 
-| Tool | Purpose | Status |
-|------|---------|--------|
-| _filled in as phases land_ | | |
+| Tool | Purpose | Kind |
+|------|---------|------|
+| `camera.list` | List configured cameras; optionally probe reachability | read-only |
+| `camera.discover` | WS-Discovery probe that returns candidates to add to the config | read-only |
+| `camera.describe` | Device information and advertised services | read-only |
+| `media.profiles` | Media profiles and whether each has PTZ | read-only |
+| `media.stream_uri` | Stream URI for a profile, credentials removed | read-only |
+| `imaging.settings` | Current imaging settings of a video source | read-only |
+| `ptz.status` | Current PTZ position and movement state | read-only |
+| `ptz.presets` | Stored presets and reported movement limits | read-only |
+| `ptz.goto_preset` | Move a camera to a stored preset | write, gated (see below) |
+
+### `ptz.goto_preset`
+
+The only tool that changes a camera. It takes `camera`, `profile` (a token from
+`media.profiles` with `has_ptz` true), `preset` (a token from `ptz.presets`) and `dry_run`.
+Three independent gates stand between an agent and a moving motor:
+
+1. **The operator starts the server with `-enable-control`.** Without it the tool is not
+   registered: it does not appear in `tools/list` and cannot be called. The
+   `onvif://server/policy` resource still names it, says why it is gated and what an
+   operator must do.
+2. **The camera opts in** with `"control": true` in its config entry. A camera that has not
+   opted in refuses with `blocked_by_policy`, for dry runs as well.
+3. **The caller passes `dry_run: false`.** `dry_run` defaults to true. A dry run does the
+   same validation a real call does (camera known, profile exists and carries PTZ, preset
+   exists) and reports the preset's stored target position and the camera's reported
+   movement limits, but never sends the move command. It says exactly what to send to
+   move.
+
+A real call is rate limited per camera (see above), sends the move command once and never
+retries it. The camera accepts the command and may still be moving when the call returns;
+`ptz.status` shows where it is. If a real call times out or faults after the command was
+sent, the camera may or may not have moved: the error says so, is not marked retryable, and
+the agent should check `ptz.status` before trying again. Every attempt, dry or real, and
+every refusal is written to stderr with the tool, camera, dry-run state, whether it executed,
+the outcome and the preset token. Arguments and credentials are never logged.
+
+To enable it for one camera:
+
+```bash
+# in cameras.json, on the PTZ camera only:  "control": true
+onvif-mcp -config cameras.json -enable-control
+```
 
 ### Output limits and caveats
 
