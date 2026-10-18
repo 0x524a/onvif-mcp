@@ -497,6 +497,15 @@ func TestAuditRejectedLogsAWarnWithoutArguments(t *testing.T) {
 	nilPolicy.AuditRejected(tool) // must not panic
 }
 
+func TestAuditRejectedWithControlOffSaysControlDisabled(t *testing.T) {
+	p, buf, _ := newPolicy(false)
+	p.AuditRejected(tool)
+	r := buf.records(t)
+	if len(r) != 1 || r[0]["reason"] != ReasonControlDisabled {
+		t.Errorf("records = %v", r)
+	}
+}
+
 func TestAttemptTrackerSeesHandlerReach(t *testing.T) {
 	ctx, tr := TrackAttempt(context.Background())
 	if tr.Reached() {

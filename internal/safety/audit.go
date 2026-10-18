@@ -98,13 +98,19 @@ func (p *Policy) AuditRejected(tool string) {
 	if p == nil || p.Log == nil {
 		return
 	}
+	// With control off the tool was never registered, so the SDK answered
+	// "unknown tool"; the arguments were never looked at.
+	reason := ReasonInvalidArguments
+	if !p.ControlEnabled {
+		reason = ReasonControlDisabled
+	}
 	p.Log.Warn("write attempt blocked",
 		"tool", clean(tool, maxAuditCamera),
 		"control_enabled", p.ControlEnabled,
 		"executed", false,
 		"outcome", "blocked",
 		"blocked", true,
-		"reason", ReasonInvalidArguments,
+		"reason", reason,
 	)
 }
 
