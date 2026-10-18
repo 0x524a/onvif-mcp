@@ -441,17 +441,19 @@ func endpointHost(endpoint string) string {
 // ctx cancellation aborts the in-flight request (onvif-go builds its HTTP
 // requests with the caller's context). On failure the returned error wraps
 // the original and its text is already scrubbed, so mcperr.FromError alone
-// classifies it (unreachable, timeout, auth_failed, ...).
+// classifies it (unreachable, timeout, auth_failed, ...). The text never names
+// the camera id: an id such as "pass-cam" reads to the scrubber as a secret's
+// key and would redact the real cause. The tool layer carries the id itself.
 func (e Entry) Client(ctx context.Context) (*onvif.Client, error) {
 	if e.cred == nil {
-		return nil, fmt.Errorf("client for %s: no connection settings", e.id)
+		return nil, errors.New("no connection settings for this camera")
 	}
 	e.cred.mu.RLock()
 	cam := e.cred.cam
 	e.cred.mu.RUnlock()
 
 	if err := ctx.Err(); err != nil {
-		return nil, scrubbed(fmt.Errorf("client for %s: %w", cam.ID, err))
+		return nil, scrubbed(fmt.Errorf("client: %w", err))
 	}
 
 	// A private transport with keep-alives off: no idle connection can outlive
@@ -468,13 +470,13 @@ func (e Entry) Client(ctx context.Context) (*onvif.Client, error) {
 		onvif.WithTimeout(cam.Timeout()),
 	)
 	if err != nil {
-		return nil, scrubbed(fmt.Errorf("new client for %s: %w", cam.ID, err))
+		return nil, scrubbed(fmt.Errorf("new client: %w", err))
 	}
 	// Initialize is not a mere connectivity probe: it populates the PTZ and
 	// Imaging endpoints, without which those services wrongly report
 	// ErrServiceNotSupported.
 	if err := c.Initialize(ctx); err != nil {
-		return nil, scrubbed(fmt.Errorf("initialize %s: %w", cam.ID, err))
+		return nil, scrubbed(fmt.Errorf("initialize: %w", err))
 	}
 	return c, nil
 }

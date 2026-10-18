@@ -447,3 +447,41 @@ func stableGoroutines(t *testing.T) int {
 	t.Fatalf("goroutine count never stabilised (last %d)", last)
 	return 0
 }
+
+// A camera id that looks sensitive to the scrubber (pass, token, secret) must
+// not turn a connection error into "internal: REDACTED": the id is not part of
+// the scrubbed error text.
+func TestSensitiveLookingIDsStillClassifyConnectionErrors(t *testing.T) {
+	for _, id := range []string{"pass-cam", "my-token", "secret1", "passage", "lobby-pw"} {
+		t.Run(id, func(t *testing.T) {
+			cam := testcam.Start(t)
+			h := newHangListener(t)
+			cases := map[string]struct {
+				cam  config.Camera
+				want mcperr.Code
+			}{
+				"auth": {config.Camera{ID: id, Endpoint: cam.Endpoint(), Username: cam.Username(), Password: "definitely-wrong"},
+					mcperr.CodeAuthFailed},
+				"unreachable": {config.Camera{ID: id, Endpoint: "http://127.0.0.1:1/onvif/device_service"}, mcperr.CodeUnreachable},
+				"timeout":     {config.Camera{ID: id, Endpoint: h.endpoint(), TimeoutSeconds: 1}, mcperr.CodeTimeout},
+			}
+			for name, tc := range cases {
+				cc := tc.cam
+				e, err := New(&config.Config{Cameras: map[string]*config.Camera{id: &cc}}).Get(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = e.Client(context.Background())
+				if err == nil {
+					t.Fatalf("%s: expected failure", name)
+				}
+				if got := codeOf(err, id); got != tc.want {
+					t.Errorf("%s: code = %s (%v), want %s", name, got, err, tc.want)
+				}
+				if strings.Contains(err.Error(), "REDACTED") {
+					t.Errorf("%s: error was redacted wholesale: %v", name, err)
+				}
+			}
+		})
+	}
+}
