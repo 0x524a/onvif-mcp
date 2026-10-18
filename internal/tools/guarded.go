@@ -221,6 +221,11 @@ func guardedHandler[In, Data any](
 			executed = true
 			res, out, err = run(ctx, req, in)
 		}
+		if out.Error != nil && out.Error.NotSent {
+			// The tool says it failed before anything left the server: the audit
+			// must not claim a command was executed. A panic keeps executed true.
+			executed = false
+		}
 		switch {
 		case err != nil:
 			outcome = "error"

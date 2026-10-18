@@ -324,26 +324,37 @@ type presetFixture struct {
 	srv       *httptest.Server
 	gotoCalls atomic.Int32
 	opts      presetFixtureOpts
+	audit     *auditBuf
+	// base, if set, becomes Deps.Base so a test can simulate shutdown.
+	base context.Context
 }
 
 type presetFixtureOpts struct {
 	noPTZConfig bool
 	gotoHandler func(w http.ResponseWriter, r *http.Request)
+	// override replaces the canned answer for one operation (GetProfiles,
+	// GetPresets, GetConfiguration); it receives the request body.
+	override map[string]func(w http.ResponseWriter, body string)
+	// presets, if set, is the inner XML of GetPresetsResponse.
+	presets string
 }
 
 func newPresetFixture(t *testing.T, o presetFixtureOpts) *presetFixture {
 	t.Helper()
-	f := &presetFixture{opts: o}
+	f := &presetFixture{opts: o, audit: &auditBuf{}}
 	ptzCfg := `<tt:PTZConfiguration token="c"><tt:Name>c</tt:Name></tt:PTZConfiguration>`
 	if o.noPTZConfig {
 		ptzCfg = ""
+	}
+	presetsXML := `<tptz:Preset token="p1"><tt:Name>Door</tt:Name></tptz:Preset>`
+	if o.presets != "" {
+		presetsXML = o.presets
 	}
 	bodies := map[string]string{
 		"GetProfiles": `<trt:GetProfilesResponse xmlns:trt="http://www.onvif.org/ver10/media/wsdl" ` + ptzNS + `>` +
 			`<trt:Profiles token="prof"><tt:Name>main</tt:Name>` + ptzCfg + `</trt:Profiles></trt:GetProfilesResponse>`,
 		"GetPresets": `<tptz:GetPresetsResponse ` + ptzNS + `>` +
-			`<tptz:Preset token="p1"><tt:Name>Door</tt:Name></tptz:Preset>` +
-			`</tptz:GetPresetsResponse>`,
+			presetsXML + `</tptz:GetPresetsResponse>`,
 		"GetConfiguration": `<tptz:GetConfigurationResponse ` + ptzNS + `><tptz:PTZConfiguration token="c"><tt:Name>c</tt:Name>` +
 			`<tt:PanTiltLimits><tt:Range><tt:URI>u</tt:URI><tt:XRange><tt:Min>-1</tt:Min><tt:Max>1</tt:Max></tt:XRange>` +
 			`<tt:YRange><tt:Min>-1</tt:Min><tt:Max>1</tt:Max></tt:YRange></tt:Range></tt:PanTiltLimits>` +
@@ -368,6 +379,12 @@ func newPresetFixture(t *testing.T, o presetFixtureOpts) *presetFixture {
 			}
 			_, _ = fmt.Fprintf(w, envelope, `<tptz:GotoPresetResponse `+ptzNS+`/>`)
 		default:
+			for op, h := range o.override {
+				if strings.Contains(body, op) {
+					h(w, body)
+					return
+				}
+			}
 			for op, b := range bodies {
 				if strings.Contains(body, op) {
 					_, _ = fmt.Fprintf(w, envelope, b)
@@ -389,11 +406,10 @@ func (f *presetFixture) rig(t *testing.T, control bool) *mcp.ClientSession {
 	cam.Control = true
 	cam.TimeoutSeconds = 1
 	reg := registry.New(&config.Config{Cameras: map[string]*config.Camera{"fx": cam}})
-	audit := &auditBuf{}
 	policy := safety.NewPolicy(safety.PolicyOptions{ControlEnabled: control, Cameras: reg, Interval: time.Hour, Burst: 1,
-		Log: slog.New(slog.NewJSONHandler(audit, nil))})
+		Log: slog.New(slog.NewJSONHandler(f.audit, nil))})
 	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
-	RegisterPTZWrites(srv, Deps{Reg: reg, Log: quietLog(), Policy: policy})
+	RegisterPTZWrites(srv, Deps{Reg: reg, Log: quietLog(), Policy: policy, Base: f.base})
 	return connectTo(t, srv)
 }
 
