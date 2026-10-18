@@ -126,6 +126,10 @@ func fail[T any](te *mcperr.ToolError) (*mcp.CallToolResult, mcperr.Out[T], erro
 	if te.Hint != "" {
 		line += " (" + te.Hint + ")"
 	}
+	if te.RetryAfterSeconds != nil {
+		// The hint says to wait; hosts that show an agent only the text need the number.
+		line += fmt.Sprintf(" [retry_after_seconds=%d]", *te.RetryAfterSeconds)
+	}
 	res := text(line)
 	res.IsError = true
 	return res, mcperr.Fail[T](te), nil

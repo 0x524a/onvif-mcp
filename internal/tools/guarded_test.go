@@ -463,3 +463,23 @@ func TestDeviceFaultAfterASentWriteSaysTheStateIsUnknown(t *testing.T) {
 		t.Errorf("dry run hint = %q", hint)
 	}
 }
+
+// The wait is in the text an agent reads, not only in structured content.
+func TestRateLimitedTextCarriesTheWaitInSeconds(t *testing.T) {
+	r := newPresetRig(t, true)
+	args := r.args(map[string]any{"dry_run": false})
+	call(t, r.cs, gotoTool, args)
+	res := call(t, r.cs, gotoTool, args)
+	if code, _ := errCode(t, res); code != "blocked_by_policy" {
+		t.Fatalf("code = %q", code)
+	}
+	txt := ""
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			txt += tc.Text
+		}
+	}
+	if !strings.Contains(txt, "retry_after_seconds=3600") {
+		t.Errorf("text = %q, want the wait in seconds", txt)
+	}
+}
