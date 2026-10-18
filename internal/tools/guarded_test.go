@@ -377,7 +377,8 @@ func TestMisuseOfTheHelperPanicsAtRegistration(t *testing.T) {
 			GuardedTool(newSrv(), Deps{Policy: p}, safety.RiskClass(99), tool(), noop, nil)
 		})
 		mustPanic(t, "read with a dry-run function", func() {
-			GuardedTool(newSrv(), Deps{Policy: p}, safety.RiskRead, tool(), noop, noop)
+			// The input is not a WriteInput, so only the dry-run function is wrong.
+			GuardedTool(newSrv(), Deps{Policy: p}, safety.RiskRead, tool(), plain, plain)
 		})
 	}
 }

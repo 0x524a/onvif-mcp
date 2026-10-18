@@ -97,3 +97,44 @@ func TestHugeCameraIDIsNotScrubbedWholeOnTheCancelledPath(t *testing.T) {
 		t.Errorf("res=%v err=%v out=%+v", res, err, out.Error)
 	}
 }
+
+// cancelOnGet is a camera lookup that cancels a context as the guard resolves
+// the camera, which is the window between the first context check and run.
+type cancelOnGet struct {
+	safety.CameraLookup
+	cancel context.CancelFunc
+}
+
+func (c cancelOnGet) Get(id string) (*registry.Entry, error) {
+	c.cancel()
+	return c.CameraLookup.Get(id)
+}
+
+func TestWriteIsNotStartedWhenShutdownBeginsDuringEvaluation(t *testing.T) {
+	reg := registry.New(&config.Config{Cameras: map[string]*config.Camera{
+		"cam-a": {ID: "cam-a", Endpoint: "http://192.0.2.1/onvif/device_service", Control: true},
+	}})
+	// Cancelling the request context propagates to the scope synchronously.
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+	audit := &auditBuf{}
+	policy := safety.NewPolicy(safety.PolicyOptions{
+		ControlEnabled: true, Cameras: cancelOnGet{reg, cancelReq}, Interval: time.Hour, Burst: 1,
+		Log: slog.New(slog.NewJSONHandler(audit, nil)),
+	})
+	var execs atomic.Int32
+	h := guardedHandler(Deps{Reg: reg, Policy: policy}, "test.nudge",
+		func(context.Context, *mcp.CallToolRequest, nudgeIn) (*mcp.CallToolResult, mcperr.Out[nudgeOut], error) {
+			execs.Add(1)
+			return nil, mcperr.OK(nudgeOut{Moved: true}), nil
+		}, nudgeNoop)
+	res, _, err := h(reqCtx, nil, nudgeIn{WriteBase: safety.WriteBase{Camera: "cam-a", DryRun: new(bool)}})
+	if err != nil || res == nil || !res.IsError || execs.Load() != 0 {
+		t.Fatalf("res=%v err=%v execs=%d", res, err, execs.Load())
+	}
+	recs := audit.records(t)
+	last := recs[len(recs)-1]
+	if last["outcome"] != "cancelled" || last["executed"] != false {
+		t.Errorf("audit = %v", last)
+	}
+}
