@@ -109,7 +109,7 @@ func TestSnapshotTrailingDotHostIsNotTheConfiguredHost(t *testing.T) {
 	}))
 	_, port, _ := splitHP(addr)
 	old := lookupHost
-	lookupHost = func(_ context.Context, h string) ([]netip.Addr, error) {
+	lookupHost = func(context.Context, string) ([]netip.Addr, error) {
 		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
 	}
 	t.Cleanup(func() { lookupHost = old })

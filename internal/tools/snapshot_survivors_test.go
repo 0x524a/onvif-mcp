@@ -51,7 +51,7 @@ func TestSnapshotUnsupportedAuthSchemeIsAuthFailed(t *testing.T) {
 
 // no-register-secret: after credentials were sent, the password is covered by Scrub.
 func TestSnapshotRegistersThePasswordWithTheRedactor(t *testing.T) {
-	const pw = "Zq83-unique-pw-p10"
+	const pw = "Zq83-unique-pw-p10" //nolint:gosec // test fixture, not a credential
 	srv := snapServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if _, p, ok := r.BasicAuth(); !ok || p != pw {
 			w.Header().Set("WWW-Authenticate", `Basic realm="x"`)
@@ -68,10 +68,10 @@ func TestSnapshotRegistersThePasswordWithTheRedactor(t *testing.T) {
 
 // no-finishText + no-sanitise-profile-text: error text from the camera is sanitised.
 func TestSnapshotErrorTextFromCameraIsSanitised(t *testing.T) {
-	fx := faultFixture(t, "snapshot not supported ‮evil")
+	fx := faultFixture(t, "snapshot not supported \u202eevil")
 	res := snap(t, snapSessionOn(t, fx, config.Camera{}, nil).cs, nil)
 	wantFault(t, res, "not_supported", "")
-	if strings.Contains(wire(t, res), "\\u202e") || strings.Contains(wire(t, res), "‮") {
+	if strings.Contains(wire(t, res), "\\u202e") || strings.Contains(wire(t, res), "\u202e") {
 		t.Errorf("bidi override survived: %s", wire(t, res))
 	}
 }

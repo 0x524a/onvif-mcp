@@ -254,7 +254,7 @@ func sniffImage(camera string, b []byte) (data []byte, mime string, w, h int, te
 		return nil, "", 0, 0, notAnImage(camera, loginHint)
 	}
 	b = bytes.TrimRight(b, "\x00")
-	end := -1
+	var end int
 	if mime == "image/jpeg" {
 		end = jpegEnd(b)
 	} else {

@@ -120,7 +120,7 @@ func TestEveryToolCarriesExactAnnotations(t *testing.T) {
 	wantOpen := map[string]bool{
 		"camera.list": false, "camera.discover": true, "camera.describe": false,
 		"media.profiles": false, "media.stream_uri": false, "stream.inspect": true,
-		"camera.snapshot": false, "ptz.status": false, "ptz.presets": false, "imaging.settings": false,
+		"camera.snapshot": true, "ptz.status": false, "ptz.presets": false, "imaging.settings": false,
 	}
 	if len(res.Tools) != len(wantOpen) {
 		t.Errorf("registered %d tools, want %d", len(res.Tools), len(wantOpen))
