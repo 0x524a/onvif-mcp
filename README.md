@@ -355,6 +355,29 @@ abandons any call still running). The tokens below are the virtual camera's fixe
 Each real and dry attempt is also written to the server's stderr as an audit line. Run
 `make demo` again to start the camera back at pan 0, tilt 0.
 
+## Hardware tests (optional)
+
+An opt-in tier runs the read tools against cameras you own. It is compiled out by the
+`hardware` build tag, is never run by `make check` or CI, and skips unless you opt in:
+
+```sh
+cp testdata/hardware.example.json ~/onvif-hw.json   # keep it outside the repository
+chmod 600 ~/onvif-hw.json                           # edit endpoints and usernames
+ONVIF_MCP_HW_CONFIG=~/onvif-hw.json ONVIF_MCP_EXAMPLE_DOME_PASSWORD=... make hardware
+```
+
+Passwords come from the config file or the usual `ONVIF_MCP_<ID>_PASSWORD` variables and are
+never printed. The read matrix calls the read tools per camera, accepts `not_supported` and
+vendor quirks, checks the result envelope and that no password appears in any output, and logs
+only camera id, tool name and outcome code.
+
+One test physically moves a camera, so it needs a second, explicit opt-in:
+`ONVIF_MCP_HW_MOVE=<camera-id>:<profile-token>:<preset-token>`. It names exactly one camera and
+one preset, calls once without `dry_run` to confirm that is a dry run, then moves once, checks
+the rate limiter refuses an immediate repeat, and polls `ptz.status` until the camera settles.
+`ONVIF_MCP_HW_RETURN=<preset-token>` optionally sends it back afterwards. You must confirm the
+preset is safe to visit; the test cannot judge that. Do not commit your config or any output.
+
 ## Scope / what this does not do
 
 onvif-mcp deliberately exposes a small surface. It does **not**:

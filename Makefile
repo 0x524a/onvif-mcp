@@ -1,4 +1,4 @@
-.PHONY: build test check lint fmt demo
+.PHONY: build test check lint fmt demo hardware
 
 build:
 	go build ./...
@@ -30,3 +30,11 @@ demo:
 		i=$$((i+1)); [ $$i -lt 50 ] || { echo "virtual camera did not start" >&2; exit 1; }; sleep 0.1; done; \
 	echo "onvif-mcp ready on stdio (control enabled for the demo camera); see README, Try it without a camera" >&2; \
 	"$$d/onvif-mcp" -config "$$d/demo.json" -enable-control
+
+# hardware runs the opt-in real-camera tier (build tag "hardware"). It is not
+# part of check and CI never runs it. ONVIF_MCP_HW_CONFIG must name a mode-0600
+# config you keep outside the repository (see testdata/hardware.example.json).
+# The gated move runs only when ONVIF_MCP_HW_MOVE is also set; see README.
+hardware:
+	@test -n "$$ONVIF_MCP_HW_CONFIG" || { echo "set ONVIF_MCP_HW_CONFIG to a mode-0600 config file"; exit 2; }
+	go test -tags hardware -race -count=1 -run TestHardware -v ./internal/mcpserver/

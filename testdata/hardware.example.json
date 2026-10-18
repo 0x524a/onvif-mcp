@@ -1,0 +1,10 @@
+{
+  "cameras": {
+    "example-dome": {
+      "endpoint": "http://192.0.2.10/onvif/device_service",
+      "username": "REPLACE_ME",
+      "password": "REPLACE_ME",
+      "timeout_seconds": 10
+    }
+  }
+}
