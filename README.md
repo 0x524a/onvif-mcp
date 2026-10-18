@@ -48,6 +48,8 @@ address on another host".
 For a camera behind NAT or with several addresses, set `"trust_advertised_hosts": true` on
 that camera to turn the check off for it. The default is `false`. Hosts are compared as
 written, so a camera configured by name that advertises its IP address needs the flag too.
+The same flag decides whether `stream.inspect` may probe a stream on another host; it never
+makes onvif-mcp send credentials there (see "Stream credentials" below).
 
 A reply body over 8 MiB is rejected with `device_fault` ("camera response too large")
 instead of being read into memory.
@@ -84,6 +86,7 @@ usage error such as an unknown flag or a missing `-config`.
 | `camera.describe` | Device information and advertised services | read-only |
 | `media.profiles` | Media profiles and whether each has PTZ | read-only |
 | `media.stream_uri` | Stream URI for a profile, credentials removed | read-only |
+| `stream.inspect` | Open a profile's RTSP stream and report codecs, tracks and best-effort resolution | read-only, open-world |
 | `imaging.settings` | Current imaging settings of a video source | read-only |
 | `ptz.status` | Current PTZ position and movement state | read-only |
 | `ptz.presets` | Stored presets and reported movement limits | read-only |
@@ -146,6 +149,12 @@ onvif-mcp -config cameras.json -enable-control
 - `media.stream_uri` removes userinfo, known secret query keys, registered passwords and the
   fragment. A secret embedded in the URI path cannot be detected and is not removed. A URI
   over 2048 characters is a `device_fault`.
+- `stream.inspect` runs the RTSP OPTIONS and DESCRIBE handshake against a profile's stream and
+  reports `reachable`, `describe_ok`, `latency_ms` and up to 32 tracks (type, codec, and for
+  H.264 and H.265 video the width and height). Resolution is parsed from the stream's own
+  parameter sets and is best-effort; a track without it has no width or height. The result
+  names the stream as scheme, host, port and path only. `timeout_seconds` defaults to 5 and is
+  clamped to 10. Credentials never appear in its input or output (see below).
 - `camera.discover` blocks for its whole probe window (3 s by default, 10 s at most). The
   underlying library checks for cancellation only between packets, so a cancel or shutdown
   waits out the rest of the window. A host with no usable network interface fails with
@@ -153,6 +162,26 @@ onvif-mcp -config cameras.json -enable-control
   a device can also reuse a real camera's endpoint reference to overwrite its addresses, which
   is inherent to WS-Discovery. Candidates on a directly attached network are preferred when the
   list is capped.
+
+### Stream credentials
+
+The stream address comes from the camera, so a hostile or compromised camera could name any
+host. `stream.inspect` therefore adds the camera's configured username and password to the
+RTSP URL itself, inside the server process, and only under these rules:
+
+- The address's host must be the host of the camera's configured ONVIF endpoint (the rule
+  that guards advertised service addresses). The scheme must be `rtsp` or `rtsps` and any
+  port 1 to 65535. Userinfo the camera put in the address is discarded.
+- Any other host is refused as `device_fault` ("camera advertised a stream address on another
+  host") and **nothing is probed**: no credentials, and no connection either, so the tool
+  cannot be used to scan an internal network.
+- A camera whose config sets `trust_advertised_hosts` is the one exception: its other-host
+  streams are probed, **without credentials** (`authenticated` is false). Unspecified,
+  multicast, broadcast and link-local addresses (including 169.254.169.254) and numeric host
+  spellings are refused even then.
+- The credentialed URL is never returned, logged or placed in an error. It lives in an
+  unprintable registry type that only this tool can reach, and every output passes the
+  redactor.
 
 ## Scope / what this does not do
 
@@ -166,7 +195,11 @@ onvif-mcp deliberately exposes a small surface. It does **not**:
 - Change imaging settings, reboot a device, manage users, or alter network
   configuration.
 - Serve video. It reports stream URIs and inspects stream metadata; it never
-  proxies or transcodes media.
+  proxies, records or transcodes media, and `stream.inspect` fetches no frames.
+- Stay inside the ONVIF service. `stream.inspect` is open-world: it connects to a stream
+  endpoint, which is a separate service from the camera's ONVIF one. The camera's
+  credentials leave the process only toward the camera's own host, and never toward
+  another host; with `trust_advertised_hosts`, another host is probed without them.
 - Discover and then drive a camera automatically. Discovery returns candidates
   only; a human must add a camera to the config before it is addressable.
 - Verify advertised capabilities. `camera.describe` reports what a device claims,

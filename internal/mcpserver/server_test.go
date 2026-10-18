@@ -14,6 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/0x524a/onvif-mcp/internal/config"
+	"github.com/0x524a/onvif-mcp/internal/probe"
 	"github.com/0x524a/onvif-mcp/internal/registry"
 	"github.com/0x524a/onvif-mcp/internal/testcam"
 )
@@ -106,8 +107,9 @@ func TestSchemaInferenceHandlesGenericOutEnvelope(t *testing.T) {
 
 // Every registered tool is pinned exactly: the set of names, and all four
 // annotation hints. Two of the hints are pointers the protocol reads as true
-// when absent, so each must be present, and only camera.discover, which reaches
-// whatever answers on the network, is open-world.
+// when absent, so each must be present, and camera.discover (whatever answers on
+// the network) and stream.inspect (a stream endpoint that is not the ONVIF
+// service) are open-world.
 func TestEveryToolCarriesExactAnnotations(t *testing.T) {
 	srv, _ := newTestServer(t, false)
 	cs := connect(t, srv)
@@ -117,7 +119,7 @@ func TestEveryToolCarriesExactAnnotations(t *testing.T) {
 	}
 	wantOpen := map[string]bool{
 		"camera.list": false, "camera.discover": true, "camera.describe": false,
-		"media.profiles": false, "media.stream_uri": false,
+		"media.profiles": false, "media.stream_uri": false, "stream.inspect": true,
 		"ptz.status": false, "ptz.presets": false, "imaging.settings": false,
 	}
 	if len(res.Tools) != len(wantOpen) {
@@ -601,8 +603,8 @@ func TestEveryToolSchemaFieldIsDescribed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Tools) != 8 {
-		t.Fatalf("expected 8 tools, got %d", len(res.Tools))
+	if len(res.Tools) != 9 {
+		t.Fatalf("expected 9 tools, got %d", len(res.Tools))
 	}
 	for _, tool := range res.Tools {
 		for label, s := range map[string]any{"input": tool.InputSchema, "output": tool.OutputSchema} {
@@ -636,6 +638,7 @@ func TestToolDescriptionsGuideUse(t *testing.T) {
 		"ptz.status":       {"media.profiles", "has_ptz", "-1"},
 		"ptz.presets":      {"media.profiles", "has_ptz", "-1"},
 		"imaging.settings": {"media.profiles", "video_source_token", "scale"},
+		"stream.inspect":   {"media.profiles", "media.stream_uri", "best-effort", "trust_advertised_hosts", "Does not fetch frames"},
 	}
 	for _, tool := range res.Tools {
 		want, ok := mustHave[tool.Name]
@@ -655,5 +658,30 @@ func TestToolDescriptionsGuideUse(t *testing.T) {
 				t.Errorf("%s: description lacks %q: %q", tool.Name, w, d)
 			}
 		}
+	}
+}
+
+// stream.inspect is wired with the real prober by default and takes an
+// injected one; the camera's credentials reach the prober and nothing else.
+func TestStreamInspectIsWiredWithAnInjectedProber(t *testing.T) {
+	cam := testcam.Start(t)
+	reg := registry.New(&config.Config{Cameras: map[string]*config.Camera{
+		"cam-a": {ID: "cam-a", Endpoint: cam.Endpoint(), Username: cam.Username(), Password: cam.Password()},
+	}})
+	fake := probe.FakeProber{Result: &probe.Result{Reachable: true, DescribeOK: true, Protocol: "rtsp",
+		Tracks: []probe.Track{{Type: "video", Format: "H264", Width: 640, Height: 480}}}}
+	cs := connect(t, New(reg, quietLog(), testPolicy(reg, false), WithProber(fake)))
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "stream.inspect", Arguments: map[string]any{"camera": "cam-a", "profile": cam.ProfileToken()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(res)
+	if res.IsError || !strings.Contains(string(b), "H264") || !strings.Contains(string(b), `"width":640`) {
+		t.Errorf("unexpected result: %s", b)
+	}
+	if strings.Contains(string(b), cam.Password()) {
+		t.Errorf("password in output: %s", b)
 	}
 }

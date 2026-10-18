@@ -10,6 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/0x524a/onvif-mcp/internal/mcperr"
+	"github.com/0x524a/onvif-mcp/internal/probe"
 	"github.com/0x524a/onvif-mcp/internal/redact"
 	"github.com/0x524a/onvif-mcp/internal/registry"
 	"github.com/0x524a/onvif-mcp/internal/safety"
@@ -58,13 +59,23 @@ func summarize(cams []registry.Status) string {
 // Option configures New.
 type Option func(*options)
 
-type options struct{ base context.Context }
+type options struct {
+	base   context.Context
+	prober probe.Prober
+}
 
 // WithBaseContext makes every tool call also stop when base is done. The SDK
 // derives handler contexts from the request, not from the Run context, so
 // without this a SIGTERM during a slow camera probe waits out the probe.
 func WithBaseContext(base context.Context) Option {
 	return func(o *options) { o.base = base }
+}
+
+// WithProber replaces the RTSP prober stream.inspect uses. The default is the
+// real one (probe.NewRTSPeek); tests inject a fake or point it at an
+// in-process RTSP server.
+func WithProber(p probe.Prober) Option {
+	return func(o *options) { o.prober = p }
 }
 
 const argHint = "Pass a JSON object containing only the fields declared in the tool's inputSchema, with the declared types."
@@ -155,7 +166,11 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 	// The first middleware added is the outermost. auditRejected must wrap
 	// everything, including the SDK's own argument validation.
 	srv.AddReceivingMiddleware(auditRejected(policy), argumentErrors)
-	deps := tools.Deps{Reg: reg, Log: log, Base: o.base, Policy: policy}
+	prober := o.prober
+	if prober == nil {
+		prober = probe.NewRTSPeek()
+	}
+	deps := tools.Deps{Reg: reg, Log: log, Base: o.base, Policy: policy, Prober: prober}
 
 	// Always tools.GuardedTool (which wraps the generic free function), never
 	// the srv.AddTool method: the method skips input validation and turns
@@ -208,6 +223,7 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 	tools.RegisterImaging(srv, deps)
 	tools.RegisterPTZReads(srv, deps)
 	tools.RegisterCamera(srv, deps)
+	tools.RegisterStream(srv, deps)
 
 	// The only write tool. It goes through tools.GuardedTool, which keeps it
 	// out of tools/list while control is disabled and lists it in the policy.
@@ -222,6 +238,6 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 		return grants
 	})
 
-	log.Debug("tools registered", "count", 9)
+	log.Debug("tools registered", "count", 10)
 	return srv
 }
