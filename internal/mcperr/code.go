@@ -48,6 +48,10 @@ type ToolError struct {
 	// RetryAfterSeconds is set only for rate-limited calls.
 	RetryAfterSeconds *int       `json:"retry_after_seconds,omitempty" jsonschema:"wait this many seconds before retrying; present only for calls refused by a rate limit"`
 	SOAP              *SOAPFault `json:"soap,omitempty" jsonschema:"the camera's own SOAP fault, present when the camera answered with one"`
+	// NotSent is set by a write tool on a failure that happened before its
+	// command left the server, so the guard does not describe the camera's
+	// state as unknown. It is never serialised.
+	NotSent bool `json:"-"`
 }
 
 // Out is the uniform envelope every tool returns. Exactly one of Data or Error

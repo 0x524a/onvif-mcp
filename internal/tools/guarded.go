@@ -139,7 +139,18 @@ func claimName(srv *mcp.Server, name string) {
 
 // sentUnknownHint is appended to a device fault that follows a real write: the
 // command left the server, so "it failed" does not mean "nothing changed".
-const sentUnknownHint = "The command was sent to the camera before this failed, so the camera's state is unknown; check it with a read tool before repeating the call."
+const sentUnknownHint = "The command was sent to the camera before this failed, so it may or may not have been executed and the camera's state is unknown; check it with a read tool (for PTZ, ptz.status) before repeating the call."
+
+// unknownStateAfterSend reports whether a failure of this class after a real
+// write leaves the outcome unknown: a SOAP fault, a timeout, or a transport
+// error can each arrive after the camera acted.
+func unknownStateAfterSend(c mcperr.Code) bool {
+	switch c {
+	case mcperr.CodeDeviceFault, mcperr.CodeTimeout, mcperr.CodeUnreachable:
+		return true
+	}
+	return false
+}
 
 // cancelled audits and reports a call that was stopped before it started.
 func cancelled[Data any](d Deps, tool, camera, shown string, dry bool) (*mcp.CallToolResult, mcperr.Out[Data], error) {
@@ -188,6 +199,7 @@ func guardedHandler[In, Data any](
 			return cancelled[Data](d, tool, camera, shown, dry)
 		}
 
+		ctx, target := safety.WithTargetSlot(ctx)
 		executed, outcome := false, "panic"
 		defer func() {
 			if r := recover(); r != nil {
@@ -200,7 +212,7 @@ func guardedHandler[In, Data any](
 					Hint:    "do not retry in a loop; the camera state is unknown, so check it with a read tool and report this to the operator",
 				})
 			}
-			d.Policy.Audit(tool, camera, dry, executed, outcome)
+			d.Policy.Audit(tool, camera, dry, executed, outcome, safety.WithTarget(target.Get()))
 		}()
 
 		if dry {
@@ -229,9 +241,13 @@ func guardedHandler[In, Data any](
 			res, out, err = fail[Data](nonFiniteError())
 		}
 		finishText(res)
-		if executed && out.Error != nil && out.Error.Code == mcperr.CodeDeviceFault {
-			te := out.Error
-			te.Hint = strings.TrimSpace(te.Hint + " " + sentUnknownHint)
+		if te := out.Error; executed && te != nil && !te.NotSent && unknownStateAfterSend(te.Code) {
+			// The outcome is unknown, so repeating the identical call blindly
+			// is not safe whatever the code's usual retry class is.
+			te.Retryable = false
+			if !strings.Contains(te.Hint, sentUnknownHint) {
+				te.Hint = strings.TrimSpace(te.Hint + " " + sentUnknownHint)
+			}
 			res, out, err = fail[Data](te)
 		}
 		return res, out, err

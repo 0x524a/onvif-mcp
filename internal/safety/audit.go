@@ -2,6 +2,7 @@ package safety
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 
 	"github.com/0x524a/onvif-mcp/internal/redact"
@@ -145,4 +146,39 @@ func NoteReached(ctx context.Context) {
 // a second record.
 func clean(s string, limit int) string {
 	return redact.ScrubBounded(s, limit, "...")
+}
+
+type targetKey struct{}
+
+// TargetSlot holds the resolved target a tool noted during one guarded call.
+type TargetSlot struct {
+	mu sync.Mutex
+	v  string
+}
+
+// Get returns the noted target, or "".
+func (s *TargetSlot) Get() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.v
+}
+
+// WithTargetSlot returns a context a tool can report its target through
+// (NoteTarget), and the slot the guard reads when it audits the call. The
+// guarded handler uses it so that the target is audited even if the tool
+// panics or fails.
+func WithTargetSlot(ctx context.Context) (context.Context, *TargetSlot) {
+	s := &TargetSlot{}
+	return context.WithValue(ctx, targetKey{}, s), s
+}
+
+// NoteTarget records the target of the call (for example a preset token) for
+// the audit record. The last value wins; it is scrubbed and bounded when
+// logged (WithTarget). Without a slot in ctx it does nothing.
+func NoteTarget(ctx context.Context, target string) {
+	if s, ok := ctx.Value(targetKey{}).(*TargetSlot); ok {
+		s.mu.Lock()
+		s.v = target
+		s.mu.Unlock()
+	}
 }
