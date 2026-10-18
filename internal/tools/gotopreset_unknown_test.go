@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/0x524a/onvif-mcp/internal/config"
 	"github.com/0x524a/onvif-mcp/internal/mcperr"
+	"github.com/0x524a/onvif-mcp/internal/testcam"
 )
 
 func plainReply(status int, body string) func(http.ResponseWriter, *http.Request) {
@@ -72,5 +74,17 @@ func TestUnknownStateHintIsAppendedExactlyOnce(t *testing.T) {
 	_, hint := errCode(t, res)
 	if n := strings.Count(hint, sentUnknownHint); n != 1 {
 		t.Errorf("warning appears %d times: %q", n, hint)
+	}
+}
+
+// A camera id that reads like a secret's key does not hide the cause.
+func TestSensitiveLookingCameraIDKeepsAuthFailedOnRealPaths(t *testing.T) {
+	cam := testcam.Start(t)
+	cams := map[string]*config.Camera{"pass-cam": {ID: "pass-cam", Endpoint: cam.Endpoint(), Username: cam.Username(),
+		Password: "definitely-wrong", Control: true}}
+	cs := harnessWith(t, cams)
+	res := call(t, cs, "media.profiles", map[string]any{"camera": "pass-cam"})
+	if code, hint := errCode(t, res); code != "auth_failed" || !strings.Contains(hint, "username and password") {
+		t.Errorf("read: code=%q hint=%q: %s", code, hint, wire(t, res))
 	}
 }
