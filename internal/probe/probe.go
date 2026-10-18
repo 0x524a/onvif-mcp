@@ -265,12 +265,16 @@ func canonicalAddr(u *base.URL) string {
 	return net.JoinHostPort(u.Hostname(), port)
 }
 
+// lookupNetIP is the resolver; tests replace it to prove the name is resolved
+// once and the connection goes to that answer.
+var lookupNetIP = net.DefaultResolver.LookupNetIP
+
 // resolveOnce returns host as an IP literal, resolving it once if it is a name.
 func resolveOnce(ctx context.Context, host string) (string, error) {
 	if a, err := netip.ParseAddr(host); err == nil {
 		return a.String(), nil
 	}
-	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	addrs, err := lookupNetIP(ctx, "ip", host)
 	if err != nil {
 		return "", err
 	}

@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/0x524a/onvif-mcp/internal/mcperr"
 )
 
 // spy is a scripted RTSP listener that counts connections, requests and
@@ -339,4 +342,60 @@ func TestEOFDuringDescribeIsMarked(t *testing.T) {
 		t.Fatalf("err = %v, want ErrEndedDuringDescribe", err)
 	}
 	assertNoLeak(t, err)
+}
+
+func TestNameIsResolvedOnceAndTheConnectionGoesToThatAnswer(t *testing.T) {
+	srv := startRaw(t, "sdp", sdpWithVideoTracks(1))
+	_, port, _ := net.SplitHostPort(srv.hostPort())
+	var lookups atomic.Int32
+	old := lookupNetIP
+	lookupNetIP = func(_ context.Context, _, host string) ([]netip.Addr, error) {
+		if host != "camera.invalid" {
+			return nil, errors.New("unexpected lookup of " + host)
+		}
+		if lookups.Add(1) > 1 {
+			// A rebinding resolver: any later answer points elsewhere.
+			return []netip.Addr{netip.MustParseAddr("203.0.113.9")}, nil
+		}
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	t.Cleanup(func() { lookupNetIP = old })
+
+	res, err := NewRTSP().Describe(context.Background(), "rtsp://"+testUser+":"+testPass+"@camera.invalid:"+port+"/s", 2*time.Second)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !res.DescribeOK {
+		t.Errorf("result = %+v", res)
+	}
+	if n := lookups.Load(); n != 1 {
+		t.Errorf("name resolved %d times, want 1", n)
+	}
+}
+
+func TestUnresolvableNameIsUnreachable(t *testing.T) {
+	old := lookupNetIP
+	lookupNetIP = func(context.Context, string, string) ([]netip.Addr, error) { return nil, errors.New("no such host") }
+	t.Cleanup(func() { lookupNetIP = old })
+	_, err := NewRTSP().Describe(context.Background(), probeWithCreds("camera.invalid:554"), time.Second)
+	assertNoLeak(t, err)
+	if te := mcperr.FromStreamError(err, "cam", "stream.inspect"); te.Code != mcperr.CodeUnreachable {
+		t.Errorf("code = %s (%v), want unreachable", te.Code, err)
+	}
+}
+
+// Some cameras answer OPTIONS with 401 too. That must not end the probe at
+// the OPTIONS step: gortsplib repeats OPTIONS inside Describe, so the error
+// surfaces from the describe step, still as auth_failed.
+func TestUnauthorizedOptionsIsToleratedAndClassified(t *testing.T) {
+	a := startSpy(t, "127.0.0.1", func(_, cseq string) string {
+		return fmt.Sprintf("RTSP/1.0 401 Unauthorized\r\nCSeq: %s\r\nWWW-Authenticate: Basic realm=\"cam\"\r\n\r\n", cseq)
+	})
+	_, err := NewRTSP().Describe(context.Background(), "rtsp://"+a.addr()+"/s", 2*time.Second)
+	if err == nil || !strings.HasPrefix(err.Error(), "RTSP describe failed") {
+		t.Fatalf("err = %v, want it to come from the describe step", err)
+	}
+	if te := mcperr.FromStreamError(err, "cam", "stream.inspect"); te.Code != mcperr.CodeAuthFailed {
+		t.Errorf("code = %s (%v), want auth_failed", te.Code, err)
+	}
 }

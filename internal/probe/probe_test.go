@@ -3,6 +3,7 @@ package probe
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -442,6 +443,12 @@ func TestResolutionComesFromTheSPS(t *testing.T) {
 		&format.H264{PayloadTyp: 96, SPS: []byte{0x67, 0x01}}}})
 	if tr.Width != 0 || tr.Height != 0 {
 		t.Errorf("unparsable SPS gave %dx%d, want unknown", tr.Width, tr.Height)
+	}
+	h265sps, _ := hex.DecodeString("420101016000000300900000030000030078a003c08010e596566924cae010000003001000000301e080")
+	tr = classify(4, &description.Media{Type: description.MediaTypeVideo, Formats: []format.Format{
+		&format.H265{PayloadTyp: 96, SPS: h265sps}}})
+	if tr.Format != "H265" || tr.Width != 1920 || tr.Height != 1080 {
+		t.Errorf("track = %+v, want H265 1920x1080", tr)
 	}
 	au := classify(2, &description.Media{Type: description.MediaTypeAudio, Formats: []format.Format{&format.G711{MULaw: false}}})
 	if au.Type != "audio" || au.Format == "" || au.Width != 0 {
