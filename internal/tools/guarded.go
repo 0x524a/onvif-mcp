@@ -194,7 +194,13 @@ func guardedHandler[In, Data any](
 		}
 		// Evaluate may have spent rate budget; do not start the write if the
 		// call was cancelled or the server began shutting down meanwhile.
+		refund := func() {
+			if dec.Refund != nil {
+				dec.Refund()
+			}
+		}
 		if err := ctx.Err(); err != nil {
+			refund() // nothing was sent, so the budget is returned
 			return cancelled[Data](d, tool, camera, shown, dry)
 		}
 
@@ -224,6 +230,8 @@ func guardedHandler[In, Data any](
 			// The tool says it failed before anything left the server: the audit
 			// must not claim a command was executed. A panic keeps executed true.
 			executed = false
+			// Nothing was sent, so the call must not cost the camera's budget.
+			refund()
 		}
 		switch {
 		case err != nil:

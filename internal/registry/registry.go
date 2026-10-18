@@ -306,6 +306,49 @@ func (e Entry) endpoint() string {
 	return redact.Scrub(e.cred.cam.Endpoint)
 }
 
+// DeviceKey identifies the physical device behind this entry: the normalised
+// endpoint (see DeviceKey). Two ids whose endpoints differ only in case,
+// scheme, default port, a trailing slash, query or fragment share a key, so
+// the rate limiter gives them one budget.
+func (e Entry) DeviceKey() string {
+	if e.cred == nil {
+		return ""
+	}
+	e.cred.mu.RLock()
+	defer e.cred.mu.RUnlock()
+	return DeviceKey(e.cred.cam.Endpoint)
+}
+
+// DeviceKey normalises a configured endpoint to "host:port/path": scheme-less,
+// lower-cased, the scheme's default port made explicit (80 for http or none,
+// 443 for https), IP literals in canonical form, no query, fragment or
+// userinfo, and no trailing slash. An endpoint that cannot be parsed is
+// returned lower-cased and trimmed, so it still keys consistently.
+func DeviceKey(endpoint string) string {
+	raw := strings.TrimSpace(endpoint)
+	scheme := "http"
+	if i := strings.Index(raw, "://"); i >= 0 {
+		scheme = strings.ToLower(raw[:i])
+		raw = raw[i+3:]
+	}
+	u, err := url.Parse("//" + raw)
+	if err != nil || u.Hostname() == "" {
+		return strings.ToLower(raw)
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if ip := net.ParseIP(host); ip != nil {
+		host = ip.String()
+	}
+	port := u.Port()
+	if port == "" {
+		port = "80"
+		if scheme == "https" {
+			port = "443"
+		}
+	}
+	return net.JoinHostPort(host, port) + strings.TrimRight(u.EscapedPath(), "/")
+}
+
 // ID returns the camera's stable handle.
 func (e Entry) ID() string { return e.id }
 

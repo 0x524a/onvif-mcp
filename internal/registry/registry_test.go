@@ -485,3 +485,41 @@ func TestSensitiveLookingIDsStillClassifyConnectionErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestDeviceKeyNormalisesTheEndpoint(t *testing.T) {
+	same := [][2]string{
+		{"http://192.0.2.1/onvif/device_service", "HTTP://192.0.2.1:80/onvif/device_service"},
+		{"http://Cam.Example/onvif/device_service", "HTTP://cam.example:80/onvif/device_service"},
+		{"https://cam.example/x", "https://CAM.example:443/x"},
+		{"192.0.2.1:8080/onvif/device_service", "http://192.0.2.1:8080/onvif/device_service/"},
+		{"http://cam.example./x", "http://CAM.example/x"},
+		{"http://[2001:db8::1]:80/x", "http://[2001:DB8:0::1]/x"},
+		{"http://192.0.2.1/x?token=a", "http://192.0.2.1/x#frag"},
+	}
+	for _, p := range same {
+		if a, b := DeviceKey(p[0]), DeviceKey(p[1]); a != b || a == "" {
+			t.Errorf("DeviceKey(%q)=%q, DeviceKey(%q)=%q: want equal and non-empty", p[0], a, p[1], b)
+		}
+	}
+	differ := [][2]string{
+		{"http://192.0.2.1/onvif/device_service", "http://192.0.2.2/onvif/device_service"},
+		{"http://192.0.2.1:80/x", "http://192.0.2.1:8080/x"},
+		{"http://192.0.2.1/x", "http://192.0.2.1/y"},
+	}
+	for _, p := range differ {
+		if DeviceKey(p[0]) == DeviceKey(p[1]) {
+			t.Errorf("DeviceKey(%q) == DeviceKey(%q), want different", p[0], p[1])
+		}
+	}
+}
+
+func TestEntryDeviceKeyIsTheNormalisedEndpoint(t *testing.T) {
+	r := New(&config.Config{Cameras: map[string]*config.Camera{
+		"a": {ID: "a", Endpoint: "http://Cam.example/x"}, "b": {ID: "b", Endpoint: "HTTP://cam.example:80/x/"},
+	}})
+	a, _ := r.Get("a")
+	b, _ := r.Get("b")
+	if a.DeviceKey() == "" || a.DeviceKey() != b.DeviceKey() {
+		t.Errorf("keys %q %q", a.DeviceKey(), b.DeviceKey())
+	}
+}

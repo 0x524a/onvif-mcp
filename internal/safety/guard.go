@@ -123,6 +123,11 @@ type Decision struct {
 	// unknown camera it carries not_found; every other refusal is
 	// blocked_by_policy.
 	Blocked *mcperr.ToolError
+	// Refund, non-nil only for an allowed real call, returns the rate budget
+	// that call took. The caller invokes it when the call ended before
+	// anything was sent to the camera (a mistyped token must not cost the
+	// agent the lockout). Calling it more than once is the caller's bug.
+	Refund func()
 }
 
 // WriteRegistered reports whether write tools should be registered at all.
@@ -133,7 +138,9 @@ func (p *Policy) WriteRegistered() bool { return p != nil && p.ControlEnabled }
 //  1. the camera is configured (an unknown id never reaches anything else)
 //  2. control is enabled for the process and granted to this camera
 //  3. a dry run stops here: it moves nothing, so it consumes no rate budget
-//  4. the audit log and rate limiter exist, and the camera has budget
+//  4. the audit log and rate limiter exist, and the camera's device has budget
+//     (the budget is per device, keyed by the normalised endpoint, so two ids
+//     for one device share it)
 //
 // The process-level registration gate is applied earlier, at registration.
 // Every refusal is audited here, so no tool can forget to record one. Allowed
@@ -194,7 +201,8 @@ func (p *Policy) Evaluate(camera, tool string, dryRun bool) Decision {
 		return refuse(blocked(camera, tool,
 			"no rate limiter is configured, so movement is refused", nil, misconfiguredHint), ReasonNoRateLimiter)
 	}
-	if ok, after := p.Limiter.Allow(camera); !ok {
+	key := entry.DeviceKey()
+	if ok, after := p.Limiter.Allow(key); !ok {
 		// Allow never reports a refusal with a wait under 1ns, so rounding up
 		// always yields at least one second.
 		secs := int(math.Ceil(after.Seconds()))
@@ -202,7 +210,7 @@ func (p *Policy) Evaluate(camera, tool string, dryRun bool) Decision {
 			"movement is rate limited to protect the camera's mechanism", &secs,
 			"wait retry_after_seconds, then repeat the call"), ReasonRateLimited)
 	}
-	return Decision{}
+	return Decision{Refund: func() { p.Limiter.Refund(key) }}
 }
 
 // misconfiguredHint is for the fail-closed refusals that only a broken server

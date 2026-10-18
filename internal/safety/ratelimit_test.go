@@ -225,3 +225,64 @@ func TestLimiterCapReclaimsFullyRefilledBuckets(t *testing.T) {
 		t.Errorf("limiter tracks %d keys, cap is 2", got)
 	}
 }
+
+func TestLimiterRefundRestoresAConsumedToken(t *testing.T) {
+	clk := newFakeClock()
+	l := NewLimiter(time.Hour, 1, WithClock(clk.Now))
+	if ok, _ := l.Allow("k"); !ok {
+		t.Fatal("first Allow refused")
+	}
+	if ok, _ := l.Allow("k"); ok {
+		t.Fatal("second Allow granted")
+	}
+	l.Refund("k")
+	if ok, _ := l.Allow("k"); !ok {
+		t.Error("Allow after Refund refused")
+	}
+	if ok, _ := l.Allow("k"); ok {
+		t.Error("a refund restored more than the one token")
+	}
+}
+
+func TestLimiterRefundIsCappedAtBurstAndIgnoresUnknownKeys(t *testing.T) {
+	l := NewLimiter(time.Hour, 2, WithClock(newFakeClock().Now))
+	l.Allow("k")
+	l.Refund("k")
+	l.Refund("k") // must not exceed burst
+	for i := 0; i < 2; i++ {
+		if ok, _ := l.Allow("k"); !ok {
+			t.Fatalf("Allow %d refused", i)
+		}
+	}
+	if ok, _ := l.Allow("k"); ok {
+		t.Error("refund exceeded the burst")
+	}
+	l.Refund("never-seen")
+	if l.size() != 1 {
+		t.Errorf("Refund created a bucket: size %d", l.size())
+	}
+}
+
+// Refunds interleaved with grants never let more than the burst through.
+func TestLimiterRefundIsAtomicUnderConcurrency(t *testing.T) {
+	l := NewLimiter(time.Hour, 1, WithClock(newFakeClock().Now))
+	var wg sync.WaitGroup
+	var granted atomic.Int32
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if ok, _ := l.Allow("k"); ok {
+				if i%2 == 0 {
+					l.Refund("k") // nothing sent
+					return
+				}
+				granted.Add(1) // sent
+			}
+		}(i)
+	}
+	wg.Wait()
+	if granted.Load() > 1 {
+		t.Errorf("%d sends with a burst of 1", granted.Load())
+	}
+}

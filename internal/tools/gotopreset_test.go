@@ -297,24 +297,26 @@ func TestGotoPresetSchemaInvalidDryRunIsRejectedAndDoesNotMove(t *testing.T) {
 }
 
 func TestGotoPresetConcurrentRealCallsMoveAtMostOnce(t *testing.T) {
-	fx := newPresetFixture(t, presetFixtureOpts{})
-	r := fx.rig(t, true)
-	var wg sync.WaitGroup
-	var ok atomic.Int32
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			res, err := r.CallTool(context.Background(), &mcp.CallToolParams{Name: gotoTool,
-				Arguments: map[string]any{"camera": "fx", "profile": "prof", "preset": "p1", "dry_run": false}})
-			if err == nil && !res.IsError {
-				ok.Add(1)
-			}
-		}()
-	}
-	wg.Wait()
-	if fx.gotoCalls.Load() != 1 || ok.Load() != 1 {
-		t.Fatalf("GotoPreset sent %d times, %d calls succeeded; want exactly 1 and 1", fx.gotoCalls.Load(), ok.Load())
+	for _, n := range []int{20, 60} {
+		fx := newPresetFixture(t, presetFixtureOpts{})
+		r := fx.rig(t, true)
+		var wg sync.WaitGroup
+		var ok atomic.Int32
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				res, err := r.CallTool(context.Background(), &mcp.CallToolParams{Name: gotoTool,
+					Arguments: map[string]any{"camera": "fx", "profile": "prof", "preset": "p1", "dry_run": false}})
+				if err == nil && !res.IsError {
+					ok.Add(1)
+				}
+			}()
+		}
+		wg.Wait()
+		if fx.gotoCalls.Load() != 1 || ok.Load() != 1 {
+			t.Fatalf("n=%d: GotoPreset sent %d times, %d calls succeeded; want exactly 1 and 1", n, fx.gotoCalls.Load(), ok.Load())
+		}
 	}
 }
 
@@ -495,5 +497,81 @@ func TestGotoPresetTimeoutAfterSendCarriesTheUnknownStateHintAndIsNotRetryable(t
 	}
 	if fx.gotoCalls.Load() != 1 {
 		t.Errorf("GotoPreset sent %d times, want 1", fx.gotoCalls.Load())
+	}
+}
+
+// A call that fails validation sent nothing, so it must not spend the camera's
+// movement budget: with an hour-long refill and a burst of 1, a mistyped token
+// followed by the right one still moves the camera.
+func TestMistypedPresetDoesNotBurnTheRateBudget(t *testing.T) {
+	fx := newPresetFixture(t, presetFixtureOpts{})
+	cs := fx.rig(t, true)
+	bad := call(t, cs, gotoTool, map[string]any{"camera": "fx", "profile": "prof", "preset": "nope", "dry_run": false})
+	if code, _ := errCode(t, bad); code != "not_found" {
+		t.Fatalf("code = %q", code)
+	}
+	good := call(t, cs, gotoTool, map[string]any{"camera": "fx", "profile": "prof", "preset": "p1", "dry_run": false})
+	if good.IsError {
+		t.Fatalf("a mistyped token cost the budget: %s", wire(t, good))
+	}
+	if fx.gotoCalls.Load() != 1 {
+		t.Errorf("GotoPreset sent %d times", fx.gotoCalls.Load())
+	}
+	// A real send does spend it.
+	again := call(t, cs, gotoTool, map[string]any{"camera": "fx", "profile": "prof", "preset": "p1", "dry_run": false})
+	if code, _ := errCode(t, again); code != "blocked_by_policy" {
+		t.Errorf("second real send: code = %q, want blocked_by_policy", code)
+	}
+}
+
+// A failure after the send keeps the budget spent.
+func TestFailureAfterTheSendKeepsTheBudgetSpent(t *testing.T) {
+	fx := newPresetFixture(t, presetFixtureOpts{gotoHandler: plainReply(500, "boom")})
+	cs := fx.rig(t, true)
+	args := map[string]any{"camera": "fx", "profile": "prof", "preset": "p1", "dry_run": false}
+	call(t, cs, gotoTool, args)
+	res := call(t, cs, gotoTool, args)
+	if code, _ := errCode(t, res); code != "blocked_by_policy" {
+		t.Errorf("code = %q, want blocked_by_policy after a sent command", code)
+	}
+	if fx.gotoCalls.Load() != 1 {
+		t.Errorf("GotoPreset sent %d times", fx.gotoCalls.Load())
+	}
+}
+
+// Two ids for one device, hit concurrently with valid and mistyped presets,
+// move it at most once: refunds only ever follow a call that sent nothing.
+func TestTwoIDsOneDeviceMixedConcurrentCallsMoveAtMostOnce(t *testing.T) {
+	for _, n := range []int{20, 60} {
+		fx := newPresetFixture(t, presetFixtureOpts{})
+		ca, cb := fixtureCamera(fx.srv), fixtureCamera(fx.srv)
+		ca.ID, cb.ID = "a", "b"
+		ca.Control, cb.Control = true, true
+		reg := registry.New(&config.Config{Cameras: map[string]*config.Camera{"a": ca, "b": cb}})
+		policy := safety.NewPolicy(safety.PolicyOptions{ControlEnabled: true, Cameras: reg, Interval: time.Hour, Burst: 1,
+			Log: slog.New(slog.NewJSONHandler(&auditBuf{}, nil))})
+		srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+		RegisterPTZWrites(srv, Deps{Reg: reg, Log: quietLog(), Policy: policy})
+		cs := connectTo(t, srv)
+		var wg sync.WaitGroup
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				id, preset := "a", "p1"
+				if i%2 == 1 {
+					id = "b"
+				}
+				if i%3 == 0 {
+					preset = "nope"
+				}
+				_, _ = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: gotoTool,
+					Arguments: map[string]any{"camera": id, "profile": "prof", "preset": preset, "dry_run": false}})
+			}(i)
+		}
+		wg.Wait()
+		if got := fx.gotoCalls.Load(); got > 1 {
+			t.Fatalf("n=%d: GotoPreset sent %d times for one device, want at most 1", n, got)
+		}
 	}
 }

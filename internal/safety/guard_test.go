@@ -538,3 +538,53 @@ func TestFailClosedRefusalsTellTheAgentItIsAServerProblem(t *testing.T) {
 	p.Limiter = nil
 	check("no limiter", p.Evaluate("cam-a", tool, false))
 }
+
+func sharedEndpointPolicy() *Policy {
+	reg := registry.New(&config.Config{Cameras: map[string]*config.Camera{
+		"a": {ID: "a", Endpoint: "http://192.0.2.9/onvif/device_service", Control: true},
+		"b": {ID: "b", Endpoint: "HTTP://192.0.2.9:80/onvif/device_service/", Control: true},
+		"c": {ID: "c", Endpoint: "http://192.0.2.10/onvif/device_service", Control: true},
+	}})
+	return NewPolicy(PolicyOptions{ControlEnabled: true, Cameras: reg, Interval: time.Hour, Burst: 1,
+		Log: slog.New(slog.NewJSONHandler(&syncBuf{}, nil))})
+}
+
+// Two ids that address one device share one rate budget.
+func TestTwoIDsOnOneDeviceShareOneBudget(t *testing.T) {
+	p := sharedEndpointPolicy()
+	if d := p.Evaluate("a", tool, false); d.Blocked != nil {
+		t.Fatalf("first call blocked: %+v", d.Blocked)
+	}
+	d := p.Evaluate("b", tool, false)
+	if d.Blocked == nil || d.Blocked.RetryAfterSeconds == nil {
+		t.Fatalf("second id on the same device was not rate limited: %+v", d)
+	}
+	if d := p.Evaluate("c", tool, false); d.Blocked != nil {
+		t.Errorf("a different device was throttled: %+v", d.Blocked)
+	}
+}
+
+// A refund returns the budget, so a call that sent nothing costs nothing, and
+// the other id sees it.
+func TestRefundReturnsTheDevicesBudget(t *testing.T) {
+	p := sharedEndpointPolicy()
+	d := p.Evaluate("a", tool, false)
+	if d.Blocked != nil || d.Refund == nil {
+		t.Fatalf("decision = %+v, want an allowed real call with a Refund", d)
+	}
+	d.Refund()
+	if d2 := p.Evaluate("b", tool, false); d2.Blocked != nil {
+		t.Errorf("budget not returned: %+v", d2.Blocked)
+	}
+}
+
+func TestDryRunAndRefusalCarryNoRefund(t *testing.T) {
+	p := sharedEndpointPolicy()
+	if d := p.Evaluate("a", tool, true); d.Refund != nil {
+		t.Error("a dry run consumed nothing, so it has nothing to refund")
+	}
+	p.Evaluate("a", tool, false)
+	if d := p.Evaluate("a", tool, false); d.Blocked == nil || d.Refund != nil {
+		t.Errorf("refusal = %+v", d)
+	}
+}

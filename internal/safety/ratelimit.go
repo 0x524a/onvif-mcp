@@ -14,16 +14,17 @@ const (
 	DefaultMaxKeys = 1024
 )
 
-// Limiter is a per-camera token bucket. Keying by camera rather than globally
-// means driving one camera does not throttle a fleet.
+// Limiter is a token bucket per key. Callers key it by physical device (the
+// normalised endpoint), not by camera id, so two ids for one device share one
+// budget, while driving one device does not throttle a fleet.
 //
 // The reason for limiting at all is physical: PTZ motors wear, and some cameras
 // wedge under rapid repeated commands. An agent looping is the expected failure
 // mode, not an edge case.
 //
-// Memory is bounded. The key is a camera id, and ids can originate in agent
-// input, so callers must only pass ids of configured cameras (Policy.Evaluate
-// enforces this before reaching the limiter). As a second line of defence the
+// Memory is bounded. A key can originate in agent input, so callers must only
+// pass keys of configured cameras (Policy.Evaluate enforces this before
+// reaching the limiter, which makes the key set at most the config's size). As a second line of defence the
 // limiter never tracks more than its key cap: when full it first reclaims
 // buckets that have refilled completely (indistinguishable from never seen),
 // and if none can be reclaimed it refuses the new key.
@@ -105,14 +106,14 @@ func (l *Limiter) Interval() time.Duration { return l.interval }
 // Burst is the bucket size.
 func (l *Limiter) Burst() int { return int(l.burst) }
 
-// Allow consumes a token for camera. On refusal it reports how long to wait.
+// Allow consumes a token for key. On refusal it reports how long to wait.
 // It is safe for concurrent use.
-func (l *Limiter) Allow(camera string) (bool, time.Duration) {
+func (l *Limiter) Allow(key string) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	now := l.now()
-	b, seen := l.buckets[camera]
+	b, seen := l.buckets[key]
 	if !seen {
 		if len(l.buckets) >= l.maxKeys {
 			l.reclaim(now)
@@ -122,7 +123,7 @@ func (l *Limiter) Allow(camera string) (bool, time.Duration) {
 			return false, l.interval
 		}
 		b = &bucket{tokens: l.burst, last: now}
-		l.buckets[camera] = b
+		l.buckets[key] = b
 	} else {
 		b.tokens = l.refilled(b, now)
 		if now.After(b.last) {
@@ -140,6 +141,28 @@ func (l *Limiter) Allow(camera string) (bool, time.Duration) {
 		wait = time.Nanosecond
 	}
 	return false, wait
+}
+
+// Refund returns the token a refused-to-send call took, for a call that ended
+// before anything reached the camera. It is atomic with Allow under the same
+// lock, never lifts the bucket above its burst, and does nothing for a key the
+// limiter does not track (that bucket was reclaimed because it had refilled
+// completely, which already is the refunded state).
+func (l *Limiter) Refund(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b, ok := l.buckets[key]
+	if !ok {
+		return
+	}
+	now := l.now()
+	b.tokens = l.refilled(b, now) + 1
+	if b.tokens > l.burst {
+		b.tokens = l.burst
+	}
+	if now.After(b.last) {
+		b.last = now
+	}
 }
 
 // reclaim drops buckets that have refilled completely. Caller holds l.mu.
