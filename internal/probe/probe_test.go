@@ -451,3 +451,10 @@ func TestResolutionComesFromTheSPS(t *testing.T) {
 		t.Errorf("no-format track = %+v", got)
 	}
 }
+
+func TestBoundStripsControlAndFormatCharacters(t *testing.T) {
+	got := Bound(&Result{Protocol: "r\x00t\u202esp", Tracks: []Track{{Type: "vi\x1bdeo", Format: "H2\u200b64"}}})
+	if got.Protocol != "rtsp" || got.Tracks[0].Type != "video" || got.Tracks[0].Format != "H264" {
+		t.Errorf("%+v", got)
+	}
+}
