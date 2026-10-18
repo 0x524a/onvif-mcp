@@ -14,6 +14,7 @@ var (
 	nat64Local     = netip.MustParsePrefix("64:ff9b:1::/48")
 	sixToFour      = netip.MustParsePrefix("2002::/16")
 	v4Compatible   = netip.MustParsePrefix("::/96")
+	siit           = netip.MustParsePrefix("::ffff:0:0:0/96")
 	awsIMDSv6      = netip.MustParseAddr("fd00:ec2::254")
 	alibabaIMDS    = netip.AddrFrom4([4]byte{100, 100, 100, 200})
 	oracleIMDS     = netip.AddrFrom4([4]byte{192, 0, 0, 192})
@@ -46,6 +47,9 @@ func neverProbedAddr(a netip.Addr) bool {
 			neverProbedAddr(netip.AddrFrom4([4]byte{b[6], b[7], b[9], b[10]}))
 	case sixToFour.Contains(a):
 		return neverProbedAddr(netip.AddrFrom4([4]byte(b[2:6])))
+	case siit.Contains(a):
+		// RFC 6145 IPv4-translated ::ffff:0:a.b.c.d
+		return neverProbedAddr(netip.AddrFrom4([4]byte(b[12:16])))
 	case v4Compatible.Contains(a) && a != ipv6Loopback:
 		return neverProbedAddr(netip.AddrFrom4([4]byte(b[12:16])))
 	}

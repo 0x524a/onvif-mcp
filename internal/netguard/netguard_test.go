@@ -11,7 +11,7 @@ func TestNeverProbed(t *testing.T) {
 		"64:ff9b::a9fe:a9fe": true, "64:ff9b::169.254.169.254": true, "64:ff9b::7f00:1": false,
 		"64:ff9b:1::a9fe:a9fe": true, "64:ff9b:1:0:0:a9fe:a9fe:0": true, "64:ff9b:1:a9fe:a9:fe00::": true,
 		"2002:a9fe:a9fe::": true, "2002:a9fe:a9fe:1::5": true, "2002:7f00:1::": false,
-		"::a9fe:a9fe": true, "::169.254.169.254": true, "::7f00:1": false, "::10.0.0.5": false,
+		"::a9fe:a9fe": true, "::ffff:0:169.254.169.254": true, "::ffff:0:10.0.0.5": false, "::169.254.169.254": true, "::7f00:1": false, "::10.0.0.5": false,
 		"fd00:ec2::254": true, "fd00:ec2::253": false, "100.100.100.200": true, "100.100.100.201": false,
 		"192.0.0.192": true, "192.0.0.193": false, "FD00:EC2::254": true,
 	} {
