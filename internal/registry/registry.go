@@ -472,6 +472,21 @@ func sameHost(a, b string) bool {
 // endpointHost returns the host (no port, no brackets) of a configured
 // endpoint, which may omit the scheme.
 func endpointHost(endpoint string) string {
+	return strings.TrimSuffix(endpointHostRaw(endpoint), ".")
+}
+
+// endpointScheme returns the lower-case scheme of a configured endpoint,
+// "http" when it has none.
+func endpointScheme(endpoint string) string {
+	e := strings.TrimSpace(endpoint)
+	if i := strings.Index(e, "://"); i >= 0 {
+		return strings.ToLower(e[:i])
+	}
+	return "http"
+}
+
+// endpointHostRaw is endpointHost with a trailing dot kept.
+func endpointHostRaw(endpoint string) string {
 	rest := strings.TrimSpace(endpoint)
 	if i := strings.Index(rest, "://"); i >= 0 {
 		rest = rest[i+3:]
@@ -483,7 +498,7 @@ func endpointHost(endpoint string) string {
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	return strings.ToLower(u.Hostname())
 }
 
 // Client returns a new client that has completed Initialize. The caller owns

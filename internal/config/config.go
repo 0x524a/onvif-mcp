@@ -56,6 +56,13 @@ type Camera struct {
 	// camera could otherwise aim the server, and the WS-Security header it
 	// sends, at any host. Set it for NATed or multi-homed cameras.
 	TrustAdvertisedHosts bool `json:"trust_advertised_hosts,omitempty"`
+	// AllowBasicOverHTTP lets camera.snapshot answer a Basic-only challenge on
+	// a plain http request, which sends the password in cleartext (base64 is
+	// not encryption) and which an on-path attacker can provoke by rewriting a
+	// Digest challenge to Basic. Defaults false. Digest, and Basic over https,
+	// are unaffected. Set it only for a camera that offers nothing but Basic on
+	// a network you trust.
+	AllowBasicOverHTTP bool `json:"allow_basic_over_http,omitempty"`
 }
 
 // Timeout returns the configured per-camera timeout, defaulting to 10s.

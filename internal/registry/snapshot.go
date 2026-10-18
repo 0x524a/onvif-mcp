@@ -56,6 +56,10 @@ const (
 	// RefusedSnapshotBlockedAddress: an address that is never contacted, trust
 	// or not; checked on the address the name resolves to as well.
 	RefusedSnapshotBlockedAddress
+	// RefusedSnapshotSchemeDowngrade: the camera is configured with an https
+	// endpoint but advertised an http snapshot address on the same host. Its
+	// credentials are never offered over plain http in that case.
+	RefusedSnapshotSchemeDowngrade
 )
 
 // SnapshotRefusal is the error FetchSnapshot returns when it sent nothing
@@ -68,6 +72,8 @@ func (r *SnapshotRefusal) Error() string {
 		return "camera advertised a snapshot address on another host"
 	case RefusedSnapshotBlockedAddress:
 		return "camera advertised a snapshot address that is never contacted"
+	case RefusedSnapshotSchemeDowngrade:
+		return "camera is configured with an https endpoint but advertised an http snapshot address"
 	default:
 		return "camera advertised a snapshot address that is not a usable http or https URL"
 	}
@@ -93,6 +99,10 @@ const (
 	SnapshotBadStatus
 	// SnapshotTooLarge: the body is over the limit (see Size and Limit).
 	SnapshotTooLarge
+	// SnapshotBasicOverHTTP: the 401 offered only Basic on a plain http
+	// request and the camera config does not set allow_basic_over_http. The
+	// password was not sent.
+	SnapshotBasicOverHTTP
 )
 
 // SnapshotError is a snapshot request that was sent and did not produce a
@@ -121,6 +131,8 @@ func (e *SnapshotError) Error() string {
 		return "snapshot address refused access (HTTP 403)"
 	case SnapshotTooLarge:
 		return "snapshot is larger than the size limit"
+	case SnapshotBasicOverHTTP:
+		return "snapshot address offers only HTTP Basic authentication over plain http, which is not used"
 	default:
 		return "snapshot address answered with HTTP status " + strconv.Itoa(e.Status)
 	}
@@ -162,9 +174,12 @@ var lookupHost = func(ctx context.Context, host string) ([]netip.Addr, error) {
 //   - the host is resolved once and every connection goes to that address, and
 //     to nothing else;
 //   - redirects are never followed, so a 3xx is an error;
-//   - the configured credentials are sent only to the configured host, only
-//     after it answered 401, and only by the scheme it asked for (Digest if
-//     offered, else Basic); a second 401 is final;
+//   - the configured credentials are sent only to the configured host (a
+//     trailing dot makes it another host), only after it answered 401, and
+//     only by the scheme it asked for (Digest if offered, else Basic); Basic
+//     is used over plain http only when the camera sets allow_basic_over_http;
+//     an https endpoint with an http snapshot address is refused outright; a
+//     second 401 is final;
 //   - the body is read through a hard limit of limit+1 bytes, so an oversized
 //     or endless body is never buffered; a declared length over the limit is
 //     refused before any body byte is read;
@@ -208,7 +223,14 @@ func (e Entry) FetchSnapshot(ctx context.Context, rawURI string, limit int64, ti
 		return SnapshotBody{}, malformed
 	}
 
-	same := sameHost(host, endpointHost(cam.Endpoint))
+	epHost := endpointHostRaw(cam.Endpoint)
+	// A trailing dot makes an absolute DNS name, which is not the name the
+	// configured endpoint resolves through (a search domain may apply to it),
+	// so it is the configured host only when both are spelled with the dot.
+	same := sameHost(host, epHost) && strings.HasSuffix(host, ".") == strings.HasSuffix(epHost, ".")
+	if same && cam.Username != "" && endpointScheme(cam.Endpoint) == "https" && scheme != "https" {
+		return SnapshotBody{}, &SnapshotRefusal{Kind: RefusedSnapshotSchemeDowngrade}
+	}
 	if !same {
 		if !cam.TrustAdvertisedHosts {
 			return SnapshotBody{}, &SnapshotRefusal{Kind: RefusedSnapshotForeignHost}
@@ -281,7 +303,11 @@ func (e Entry) FetchSnapshot(ctx context.Context, rawURI string, limit int64, ti
 		if !canAuth {
 			return SnapshotBody{}, &SnapshotError{Kind: SnapshotUnauthorized, Status: 401}
 		}
-		authz, aerr := authorize(chs, cam.Username, cam.Password, http.MethodGet, target.RequestURI())
+		authz, aerr := authorize(chs, cam.Username, cam.Password, http.MethodGet, target.RequestURI(),
+			scheme == "https" || cam.AllowBasicOverHTTP)
+		if errors.Is(aerr, errBasicOverHTTP) {
+			return SnapshotBody{}, &SnapshotError{Kind: SnapshotBasicOverHTTP, Status: 401}
+		}
 		if aerr != nil {
 			return SnapshotBody{}, &SnapshotError{Kind: SnapshotAuthUnsupported, Status: 401}
 		}

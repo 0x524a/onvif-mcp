@@ -46,8 +46,16 @@ func testJPEG(t testing.TB, w, h int) []byte {
 	return b.Bytes()
 }
 
-// snapEntry is a camera whose configured host is 127.0.0.1.
+// snapEntry is a camera whose configured host is 127.0.0.1. Basic over plain
+// http is allowed, because the test servers are plain http; the policy tests
+// use snapEntryStrict.
 func snapEntry(cam config.Camera) Entry {
+	cam.AllowBasicOverHTTP = true
+	return snapEntryStrict(cam)
+}
+
+// snapEntryStrict is snapEntry with the camera config exactly as given.
+func snapEntryStrict(cam config.Camera) Entry {
 	if cam.Endpoint == "" {
 		cam.Endpoint = "http://127.0.0.1:1/onvif/device_service"
 	}

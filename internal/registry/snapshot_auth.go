@@ -119,10 +119,19 @@ func splitParam(item string) (k, v string, ok bool) {
 // quality of protection this client does not implement.
 var errAuthUnsupported = errors.New("unsupported authentication challenge")
 
+// errBasicOverHTTP means only Basic was offered on a plain http request and
+// the camera has not opted in to that.
+var errBasicOverHTTP = errors.New("basic authentication over plain http is not allowed")
+
 // authorize answers the camera's 401 with the strongest scheme it offered:
 // Digest if present, else Basic. The method and uri are those of the request
 // being retried.
-func authorize(chs []challenge, user, pass, method, uri string) (string, error) {
+//
+// allowBasic says whether Basic may be answered; it is false on a plain http
+// request unless the operator opted in, because the password would cross the
+// network in cleartext and an on-path attacker can turn a Digest challenge
+// into a Basic one. A Basic-only challenge then gives errBasicOverHTTP.
+func authorize(chs []challenge, user, pass, method, uri string, allowBasic bool) (string, error) {
 	for _, c := range chs {
 		if c.scheme == "digest" {
 			return digestHeader(c, user, pass, method, uri)
@@ -130,6 +139,9 @@ func authorize(chs []challenge, user, pass, method, uri string) (string, error) 
 	}
 	for _, c := range chs {
 		if c.scheme == "basic" {
+			if !allowBasic {
+				return "", errBasicOverHTTP
+			}
 			return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass)), nil
 		}
 	}
