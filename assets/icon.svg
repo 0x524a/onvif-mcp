@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="256" height="256" role="img" aria-label="onvif-mcp">
+<title>onvif-mcp</title>
+<style>
+.ink{stroke:#12263F} .inkf{fill:#12263F} .gl{stroke:#3F86BD} .glf{fill:#3F86BD} .am{stroke:#D97A00}
+@media (prefers-color-scheme: dark){.ink{stroke:#E8F0F7} .inkf{fill:#E8F0F7} .gl{stroke:#6FB1E0} .glf{fill:#6FB1E0} .am{stroke:#FFB020}}
+</style>
+<path d="M43.39 6.42 A28 28 0 1 1 20.61 6.42" fill="none" class="ink" stroke-width="5" stroke-linecap="round"/>
+<path d="M41.97 9.62 L22.03 9.62" fill="none" class="am" stroke-width="5" stroke-linecap="round"/>
+<circle cx="32" cy="32" r="19" fill="none" class="gl" stroke-width="2"/>
+<circle cx="32" cy="32" r="12" class="inkf"/>
+<circle cx="28" cy="28" r="3.2" class="glf"/>
+</svg>
