@@ -306,6 +306,16 @@ func (e Entry) endpoint() string {
 	return redact.Scrub(e.cred.cam.Endpoint)
 }
 
+// Timeout is the camera's per-request timeout (see config.Camera.Timeout).
+func (e Entry) Timeout() time.Duration {
+	if e.cred == nil {
+		return (&config.Camera{}).Timeout()
+	}
+	e.cred.mu.RLock()
+	defer e.cred.mu.RUnlock()
+	return e.cred.cam.Timeout()
+}
+
 // DeviceKey identifies the physical device behind this entry: the normalised
 // endpoint (see DeviceKey). Two ids whose endpoints differ only in case,
 // scheme, default port, a trailing slash, query or fragment share a key, so

@@ -197,7 +197,7 @@ func TestGotoPresetRealRunMovesTheCameraToThePresetOnce(t *testing.T) {
 	if d["executed"] != true || d["dry_run"] != false {
 		t.Errorf("data = %v", d)
 	}
-	if note, _ := d["note"].(string); !strings.Contains(note, "ptz.status") || !strings.Contains(note, "in progress") {
+	if note, _ := d["note"].(string); !strings.Contains(note, "ptz.status") || !strings.Contains(note, "still be moving") {
 		t.Errorf("note must say motion may continue and point to ptz.status: %q", note)
 	}
 	after := r.cam.PTZPosition()
@@ -339,6 +339,9 @@ type presetFixtureOpts struct {
 	override map[string]func(w http.ResponseWriter, body string)
 	// presets, if set, is the inner XML of GetPresetsResponse.
 	presets string
+	// slowReads delays every PTZ and media read (not GetCapabilities or
+	// GotoPreset) by this long before answering.
+	slowReads time.Duration
 }
 
 func newPresetFixture(t *testing.T, o presetFixtureOpts) *presetFixture {
@@ -381,6 +384,7 @@ func newPresetFixture(t *testing.T, o presetFixtureOpts) *presetFixture {
 			}
 			_, _ = fmt.Fprintf(w, envelope, `<tptz:GotoPresetResponse `+ptzNS+`/>`)
 		default:
+			time.Sleep(o.slowReads)
 			for op, h := range o.override {
 				if strings.Contains(body, op) {
 					h(w, body)
@@ -399,6 +403,16 @@ func newPresetFixture(t *testing.T, o presetFixtureOpts) *presetFixture {
 	url = f.srv.URL
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// deps is the tool dependencies over the fixture as camera fx (opted in).
+func (f *presetFixture) deps(t *testing.T) Deps {
+	t.Helper()
+	cam := fixtureCamera(f.srv)
+	cam.Control = true
+	cam.TimeoutSeconds = 1
+	reg := registry.New(&config.Config{Cameras: map[string]*config.Camera{"fx": cam}})
+	return Deps{Reg: reg, Log: quietLog()}
 }
 
 // rig serves the write tool over the fixture as camera fx (opted in, 1s timeout).
