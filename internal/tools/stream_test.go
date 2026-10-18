@@ -885,3 +885,16 @@ func TestDepsHasNoCredentialFunc(t *testing.T) {
 		return false
 	})
 }
+
+// A probe that refuses a resolved address surfaces as the same message as a
+// refused advertised address.
+func TestInspectMapsProbeBlockedAddressToTheBlockedMessage(t *testing.T) {
+	env := streamSession(t, "rtsp://127.0.0.1:1/s", config.Camera{}, &captureProber{err: func(string) error { return probe.ErrBlockedAddress }})
+	res := inspect(t, env.cs, nil)
+	if !res.IsError {
+		t.Fatalf("expected an error: %s", wire(t, res))
+	}
+	if w := wire(t, res); !strings.Contains(w, "never probes") || !strings.Contains(w, "device_fault") {
+		t.Errorf("wire = %s", w)
+	}
+}

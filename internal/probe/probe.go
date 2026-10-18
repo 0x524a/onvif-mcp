@@ -38,6 +38,7 @@ import (
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 
+	"github.com/0x524a/onvif-mcp/internal/netguard"
 	"github.com/0x524a/onvif-mcp/internal/redact"
 )
 
@@ -106,8 +107,12 @@ var ErrEndedDuringDescribe = errors.New("stream ended the connection during DESC
 // ErrRedirected and errDialRefused are the errors for a 3xx and for a dial the
 // client may not make.
 var (
-	ErrRedirected  = errors.New("stream redirected; not followed")
-	errDialRefused = errors.New("stream client refused to dial an address other than the probed one")
+	ErrRedirected = errors.New("stream redirected; not followed")
+	// ErrBlockedAddress is returned, before any connection, when the stream's
+	// host resolves to an address that is never probed (unspecified,
+	// multicast, broadcast or link-local).
+	ErrBlockedAddress = errors.New("stream host resolves to an address that is never probed")
+	errDialRefused    = errors.New("stream client refused to dial an address other than the probed one")
 )
 
 type outcome struct {
@@ -195,6 +200,11 @@ func describe(ctx context.Context, u *base.URL, timeout time.Duration, lookup lo
 	ip, err := resolveOnce(ctx, host, lookup)
 	if err != nil {
 		return nil, fmt.Errorf("connection failed: %w", err)
+	}
+	// The refusal is on the resolved address, whatever the name was, and
+	// before any client exists, so nothing is dialled.
+	if netguard.NeverProbed(ip) {
+		return nil, ErrBlockedAddress
 	}
 	pinned := net.JoinHostPort(ip, port)
 
@@ -415,7 +425,7 @@ func secretsOf(rawURL string) []string {
 // sentinels are the error identities downstream classification relies on.
 // They are re-attached by identity, never by carrying the library's error
 // chain, which can hold text derived from the URL.
-var sentinels = []error{rtspeek.ErrInvalidURL, context.DeadlineExceeded, context.Canceled, ErrEndedDuringDescribe, ErrRedirected}
+var sentinels = []error{rtspeek.ErrInvalidURL, context.DeadlineExceeded, context.Canceled, ErrEndedDuringDescribe, ErrRedirected, ErrBlockedAddress}
 
 type probeError struct {
 	msg   string

@@ -96,14 +96,18 @@ func refusalError(camera string, err error) *mcperr.ToolError {
 				"really streams from another host, the operator can set trust_advertised_hosts for it in the config "+
 				"(the stream is then probed without credentials)")
 	case registry.RefusedBlockedAddress:
-		return streamFault(camera, "camera advertised a stream address that onvif-mcp never probes",
-			"unspecified, multicast, broadcast, link-local and numeric-spelled addresses are refused even when "+
-				"trust_advertised_hosts is set; nothing was probed")
+		return blockedAddressError(camera)
 	default:
 		return streamFault(camera, "camera advertised a stream address that is not a usable rtsp or rtsps URL",
 			"the scheme must be rtsp or rtsps and any port 1 to 65535; nothing was probed; "+
 				"media.stream_uri shows the address the camera advertised")
 	}
+}
+
+func blockedAddressError(camera string) *mcperr.ToolError {
+	return streamFault(camera, "camera advertised a stream address that onvif-mcp never probes",
+		"unspecified, multicast, broadcast, link-local and numeric-spelled addresses are refused even when "+
+			"trust_advertised_hosts is set; nothing was probed")
 }
 
 // scrubbedStreamErr carries probe error text with the credentials removed and
@@ -276,6 +280,10 @@ func inspectStream(ctx context.Context, d Deps, prober probe.Prober, in StreamIn
 		return fail[InspectData](refusalError(in.Camera, perr))
 	}
 	res, err := prober.Describe(ctx, sp.CredentialedURL(), time.Duration(secs)*time.Second)
+	if errors.Is(err, probe.ErrBlockedAddress) {
+		// The name resolved to an address that is never probed; no connection was made.
+		return fail[InspectData](blockedAddressError(in.Camera))
+	}
 	if err != nil {
 		// Scrubbed here as well as by the prober, and again by the sanitiser.
 		clean := &scrubbedStreamErr{msg: sp.Scrub(err.Error()), err: err}

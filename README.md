@@ -180,7 +180,8 @@ RTSP URL itself, inside the server process, and only under these rules:
 - A camera whose config sets `trust_advertised_hosts` is the one exception: its other-host
   streams are probed, **without credentials** (`authenticated` is false). Unspecified,
   multicast, broadcast and link-local addresses (including 169.254.169.254) and numeric host
-  spellings are refused even then.
+  spellings are refused even then, and the same check is applied to the address a
+  host name resolves to, before any connection is made.
 - The probe's client may open one connection, to the single address of the URL (resolved
   once), and never follows an RTSP redirect: a 3xx from the stream is an error, so a stream
   cannot steer the credentials, or the probe, to another host or port.

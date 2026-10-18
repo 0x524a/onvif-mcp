@@ -399,3 +399,42 @@ func TestUnauthorizedOptionsIsToleratedAndClassified(t *testing.T) {
 		t.Errorf("code = %s (%v), want auth_failed", te.Code, err)
 	}
 }
+
+// A name that resolves to a never-probed address makes no connection, even
+// for a camera that trusts its advertised hosts: the refusal is on the
+// resolved IP, so a hostile name cannot steer the probe at metadata or
+// wildcard addresses.
+func TestResolvedNeverProbedAddressIsRefusedBeforeAnyDial(t *testing.T) {
+	for _, ip := range []string{"169.254.169.254", "0.0.0.0", "::", "224.0.0.1", "255.255.255.255", "fe80::1", "::ffff:169.254.169.254"} {
+		t.Run(ip, func(t *testing.T) {
+			old := lookupNetIP
+			lookupNetIP = func(context.Context, string, string) ([]netip.Addr, error) {
+				return []netip.Addr{netip.MustParseAddr(ip)}, nil
+			}
+			t.Cleanup(func() { lookupNetIP = old })
+			start := time.Now()
+			_, err := NewRTSP().Describe(context.Background(), probeWithCreds("camera.invalid:554"), 5*time.Second)
+			if !errors.Is(err, ErrBlockedAddress) {
+				t.Fatalf("err = %v, want ErrBlockedAddress", err)
+			}
+			if d := time.Since(start); d > time.Second {
+				t.Errorf("took %v: a dial was attempted", d)
+			}
+			assertNoLeak(t, err)
+		})
+	}
+}
+
+func TestResolvedLoopbackIsStillProbed(t *testing.T) {
+	srv := startRaw(t, "sdp", sdpWithVideoTracks(1))
+	_, port, _ := net.SplitHostPort(srv.hostPort())
+	old := lookupNetIP
+	lookupNetIP = func(context.Context, string, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	t.Cleanup(func() { lookupNetIP = old })
+	res, err := NewRTSP().Describe(context.Background(), "rtsp://camera.invalid:"+port+"/s", 2*time.Second)
+	if err != nil || !res.DescribeOK {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
