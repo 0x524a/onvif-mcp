@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -103,6 +104,12 @@ const (
 	// request and the camera config does not set allow_basic_over_http. The
 	// password was not sent.
 	SnapshotBasicOverHTTP
+	// SnapshotMalformedReply: the reply was not valid HTTP (bad framing, a
+	// header block over the limit, a negative length, and the like).
+	SnapshotMalformedReply
+	// SnapshotUntrustedCertificate: the https snapshot address presented a
+	// certificate that does not verify. There is no option to skip that check.
+	SnapshotUntrustedCertificate
 )
 
 // SnapshotError is a snapshot request that was sent and did not produce a
@@ -133,6 +140,10 @@ func (e *SnapshotError) Error() string {
 		return "snapshot is larger than the size limit"
 	case SnapshotBasicOverHTTP:
 		return "snapshot address offers only HTTP Basic authentication over plain http, which is not used"
+	case SnapshotMalformedReply:
+		return "snapshot address sent a reply that is not valid HTTP"
+	case SnapshotUntrustedCertificate:
+		return "snapshot address presented a certificate that is not trusted"
 	default:
 		return "snapshot address answered with HTTP status " + strconv.Itoa(e.Status)
 	}
@@ -287,7 +298,7 @@ func (e Entry) FetchSnapshot(ctx context.Context, rawURI string, limit int64, ti
 		}
 		resp, derr := hc.Do(req)
 		if derr != nil {
-			return nil, cleanTransportErr(derr)
+			return nil, classifyTransportErr(derr)
 		}
 		return resp, nil
 	}
@@ -331,14 +342,55 @@ func (e Entry) FetchSnapshot(ctx context.Context, rawURI string, limit int64, ti
 	if resp.ContentLength > limit {
 		return SnapshotBody{}, &SnapshotError{Kind: SnapshotTooLarge, Size: resp.ContentLength, Limit: limit, Authenticated: authed}
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	data, err := readBody(resp.Body, resp.ContentLength, limit)
 	if err != nil {
-		return SnapshotBody{}, cleanTransportErr(err)
+		return SnapshotBody{}, classifyTransportErr(err)
 	}
 	if int64(len(data)) > limit {
 		return SnapshotBody{}, &SnapshotError{Kind: SnapshotTooLarge, Size: -1, Limit: limit, Authenticated: authed}
 	}
 	return SnapshotBody{Data: data, Authenticated: authed}, nil
+}
+
+// readBody reads at most limit+1 bytes of r. With a declared length (already
+// checked against limit) it fills one exact allocation. Without one it reads
+// 64 KiB chunks and copies them once into the result, so a body is held at
+// most twice and never through geometric re-growth.
+func readBody(r io.Reader, declared, limit int64) ([]byte, error) {
+	if declared >= 0 {
+		buf := make([]byte, declared)
+		n, err := io.ReadFull(r, buf)
+		if err != nil {
+			return nil, err
+		}
+		// The declared length is complete; one more byte would mean a lying
+		// length, which net/http already turns into an error, so there is
+		// nothing further to read.
+		return buf[:n], nil
+	}
+	const chunk = 64 << 10
+	var chunks [][]byte
+	var total int64
+	lr := io.LimitReader(r, limit+1)
+	for {
+		c := make([]byte, chunk)
+		n, err := io.ReadFull(lr, c)
+		total += int64(n)
+		if n > 0 {
+			chunks = append(chunks, c[:n])
+		}
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	out := make([]byte, 0, total)
+	for _, c := range chunks {
+		out = append(out, c...)
+	}
+	return out, nil
 }
 
 func statusError(code int, authed bool) *SnapshotError {
@@ -389,6 +441,39 @@ type transportError struct {
 
 func (e *transportError) Error() string { return e.msg }
 func (e *transportError) Unwrap() error { return e.err }
+
+// classifyTransportErr turns a failed exchange into the error FetchSnapshot
+// returns. A cancelled or timed-out context, a network error and a connection
+// that ended early keep their chain, so they classify as unreachable or
+// timeout. An untrusted certificate and a reply that is not valid HTTP get
+// their own kinds: both are the camera's doing, and neither text is echoed.
+func classifyTransportErr(err error) error {
+	// *url.Error implements net.Error whatever it wraps, so look inside it.
+	orig := err
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		err = ue.Err
+	}
+	var (
+		ref    *SnapshotRefusal
+		uae    x509.UnknownAuthorityError
+		he     x509.HostnameError
+		cie    x509.CertificateInvalidError
+		cve    *tls.CertificateVerificationError
+		neterr net.Error
+	)
+	switch {
+	case errors.As(err, &ref):
+		return orig
+	case errors.As(err, &uae), errors.As(err, &he), errors.As(err, &cie), errors.As(err, &cve):
+		return &SnapshotError{Kind: SnapshotUntrustedCertificate}
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled),
+		errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF),
+		errors.As(err, &neterr):
+		return cleanTransportErr(orig)
+	}
+	return &SnapshotError{Kind: SnapshotMalformedReply}
+}
 
 func cleanTransportErr(err error) error {
 	var ue *url.Error

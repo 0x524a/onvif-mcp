@@ -1,10 +1,17 @@
 package registry
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/0x524a/onvif-mcp/internal/config"
@@ -122,4 +129,104 @@ func splitHP(a string) (string, string, error) {
 		}
 	}
 	return a, "", errors.New("no port")
+}
+
+// rawServer answers every connection with the given bytes, verbatim.
+func rawServer(t *testing.T, reply string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = c.Close() }()
+				buf := make([]byte, 4096)
+				_, _ = c.Read(buf)
+				_, _ = c.Write([]byte(reply))
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+func TestSnapshotGarbledReplyIsAMalformedReplyError(t *testing.T) {
+	for name, reply := range map[string]string{
+		"negative length": "HTTP/1.1 200 OK\r\nContent-Length: -5\r\n\r\nxx",
+		"not http":        "SSH-2.0-OpenSSH_9.6\r\n",
+		"huge header":     "HTTP/1.1 200 OK\r\nX: " + strings.Repeat("a", 20<<10) + "\r\n\r\n",
+		"bad chunk":       "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nZZZ\r\nabc",
+	} {
+		t.Run(name, func(t *testing.T) {
+			addr := rawServer(t, reply)
+			_, err := fetch(t, snapEntry(config.Camera{}), "http://"+addr+"/s", 1<<20)
+			if se := snapErr(t, err); se.Kind != SnapshotMalformedReply {
+				t.Errorf("kind = %v", se.Kind)
+			}
+		})
+	}
+}
+
+func TestSnapshotTruncatedBodyIsNotMalformed(t *testing.T) {
+	addr := rawServer(t, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort")
+	_, err := fetch(t, snapEntry(config.Camera{}), "http://"+addr+"/s", 1<<20)
+	var se *SnapshotError
+	if errors.As(err, &se) {
+		t.Errorf("a short body is a transport failure, got %v", se.Kind)
+	}
+	if err == nil || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("err = %v, want unexpected EOF in the chain", err)
+	}
+}
+
+func TestSnapshotUntrustedCertificateIsItsOwnError(t *testing.T) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(testJPEG(t, 4, 4)) }))
+	t.Cleanup(ts.Close)
+	_, port, _ := net.SplitHostPort(ts.Listener.Addr().String())
+	e := snapEntry(config.Camera{Endpoint: "https://127.0.0.1/onvif/device_service"})
+	_, err := fetch(t, e, "https://127.0.0.1:"+port+"/s", 1<<20)
+	if se := snapErr(t, err); se.Kind != SnapshotUntrustedCertificate {
+		t.Errorf("kind = %v", se.Kind)
+	}
+}
+
+// With a known length the body is read into one exact allocation; with none it
+// is read in chunks and copied once. Neither goes through geometric growth.
+func TestSnapshotReadAllocatesLittleMoreThanTheBody(t *testing.T) {
+	const size = 6 << 20
+	body := bytes.Repeat([]byte{0xAB}, size)
+	for name, chunked := range map[string]bool{"content-length": false, "chunked": true} {
+		t.Run(name, func(t *testing.T) {
+			addr, _ := listen127(t, 1, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if chunked {
+					w.(http.Flusher).Flush()
+				} else {
+					w.Header().Set("Content-Length", strconv.Itoa(size))
+				}
+				_, _ = w.Write(body)
+			}))
+			e := snapEntry(config.Camera{})
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			got, err := fetch(t, e, "http://"+addr+"/s", 8<<20)
+			runtime.ReadMemStats(&after)
+			if err != nil || len(got.Data) != size {
+				t.Fatalf("err=%v len=%d", err, len(got.Data))
+			}
+			limit := uint64(size + size/4)
+			if chunked {
+				limit = uint64(2*size + size/4)
+			}
+			if grew := after.TotalAlloc - before.TotalAlloc; grew > limit {
+				t.Errorf("allocated %d bytes for a %d byte body (limit %d)", grew, size, limit)
+			}
+		})
+	}
 }
