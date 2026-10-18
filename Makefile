@@ -1,4 +1,4 @@
-.PHONY: build test check lint fmt demo hardware
+.PHONY: build test check lint fmt demo hardware release-check release-dry-run
 
 build:
 	go build ./...
@@ -38,3 +38,29 @@ demo:
 hardware:
 	@test -n "$$ONVIF_MCP_HW_CONFIG" || { echo "set ONVIF_MCP_HW_CONFIG to a mode-0600 config file"; exit 2; }
 	go test -tags hardware -race -count=1 -run TestHardware -v ./internal/mcpserver/
+
+# release-check runs the full gate, extracts the CHANGELOG notes for VERSION and
+# cross-builds the archives and SHA256SUMS into dist/ (do not commit dist/).
+#   make release-check VERSION=v0.1.0
+release-check:
+	@test -n "$(VERSION)" || { echo "usage: make release-check VERSION=vX.Y.Z"; exit 2; }
+	test -z "$$(gofmt -l .)"
+	go vet ./...
+	golangci-lint run
+	go test -race -count=1 ./...
+	scripts/release-notes.sh "$(VERSION)" > /dev/null
+	scripts/build-release.sh "$(VERSION)" dist
+	cd dist && sha256sum -c SHA256SUMS
+	@echo "release-check OK for $(VERSION); notes preview: scripts/release-notes.sh $(VERSION)"
+
+# release-dry-run is release-check plus a look at what the workflow would
+# publish: the notes, the file list, and the version the linux binary reports.
+release-dry-run: release-check
+	@echo "--- release notes ($(VERSION)) ---"; scripts/release-notes.sh "$(VERSION)"
+	@echo "--- assets ---"; ls -l dist
+	@case "$(VERSION)" in *-*) echo "would mark as pre-release";; *) echo "would publish as a full release";; esac
+	@m=$$(uname -m); case $$m in x86_64) a=amd64;; aarch64|arm64) a=arm64;; *) a=;; esac; \
+	o=$$(uname -s | tr A-Z a-z); \
+	if [ -n "$$a" ] && [ -f "dist/onvif-mcp_$(VERSION)_$${o}_$$a.tar.gz" ]; then \
+		d=$$(mktemp -d); tar -xzf "dist/onvif-mcp_$(VERSION)_$${o}_$$a.tar.gz" -C "$$d"; \
+		echo "host binary reports: $$("$$d/onvif-mcp_$(VERSION)_$${o}_$$a/onvif-mcp" -version)"; rm -rf "$$d"; fi

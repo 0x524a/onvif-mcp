@@ -17,8 +17,10 @@ import (
 	"github.com/0x524a/onvif-mcp/internal/tools"
 )
 
-// version is the server's reported version.
-const version = "v0.1.0"
+// version is the server's reported version. It is a var, not a const, so release
+// builds can set it with -ldflags "-X github.com/0x524a/onvif-mcp/internal/mcpserver.version=vX.Y.Z"
+// (scripts/build-release.sh does). A plain go build reports the value below.
+var version = "v0.1.0"
 
 // Version returns the server version reported during initialisation.
 func Version() string { return version }
