@@ -48,6 +48,8 @@ type InspectData struct {
 	Protocol      string      `json:"protocol,omitempty" jsonschema:"the protocol the stream spoke, for example rtsp"`
 	LatencyMs     float64     `json:"latency_ms" jsonschema:"time the handshake took, in milliseconds; 0 when not reported"`
 	Tracks        []TrackInfo `json:"tracks" jsonschema:"the stream's media tracks in the order it described them, at most 32"`
+	TotalTracks   int         `json:"total_tracks" jsonschema:"how many tracks the stream described in all; can exceed the number listed in tracks"`
+	Truncated     bool        `json:"tracks_truncated" jsonschema:"true when the stream described more tracks than the 32 listed in tracks, so the list is incomplete"`
 	Note          string      `json:"note" jsonschema:"how far to trust width and height: they are best-effort, parsed from the stream's parameter sets, and missing when the stream did not carry them"`
 }
 
@@ -146,8 +148,15 @@ func inspectSummary(d InspectData) string {
 	if len(parts) == 0 {
 		return fmt.Sprintf("Stream %s was described (%s) with no tracks.", d.Stream, auth)
 	}
+	// The "(+N more; see structured result)" tail of joinWithin refers only to
+	// the text-length cut: every listed track is in the structured result.
+	list := joinWithin(parts, "; ", maxTextChars-160, len(parts))
+	if d.Truncated {
+		return fmt.Sprintf("Stream %s has %d tracks, first %d listed (%s): %s. Resolution is best-effort.",
+			d.Stream, d.TotalTracks, len(parts), auth, list)
+	}
 	return fmt.Sprintf("Stream %s has %d track(s) (%s): %s. Resolution is best-effort.",
-		d.Stream, len(parts), auth, joinWithin(parts, "; ", maxTextChars-160, len(parts)))
+		d.Stream, len(parts), auth, list)
 }
 
 // streamHints adds the recovery advice mcperr cannot know: it depends on
@@ -296,7 +305,7 @@ func inspectStream(ctx context.Context, d Deps, prober probe.Prober, in StreamIn
 	data := InspectData{
 		Stream: sp.Display(), Authenticated: sp.Authenticated(),
 		Reachable: res.Reachable, DescribeOK: res.DescribeOK, Protocol: res.Protocol,
-		LatencyMs: res.LatencyMs, Tracks: trackInfos(res), Note: resolutionNote,
+		LatencyMs: res.LatencyMs, Tracks: trackInfos(res), TotalTracks: res.TotalTracks, Truncated: res.Truncated, Note: resolutionNote,
 	}
 	return text(strings.TrimSpace(inspectSummary(data))), mcperr.OK(data), nil
 }

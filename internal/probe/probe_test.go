@@ -465,3 +465,34 @@ func TestBoundStripsControlAndFormatCharacters(t *testing.T) {
 		t.Errorf("%+v", got)
 	}
 }
+
+func TestBoundKeepsTotalAndFlagsTruncation(t *testing.T) {
+	r := &Result{DescribeOK: true, TotalTracks: 1500}
+	for i := 0; i < 40; i++ {
+		r.Tracks = append(r.Tracks, Track{Index: i, Type: "video"})
+	}
+	b := Bound(r)
+	if len(b.Tracks) != MaxTracks || b.TotalTracks != 1500 || !b.Truncated {
+		t.Errorf("tracks=%d total=%d truncated=%v", len(b.Tracks), b.TotalTracks, b.Truncated)
+	}
+	// A prober that did not set the total cannot under-report it.
+	b = Bound(&Result{Tracks: make([]Track, 3)})
+	if b.TotalTracks != 3 || b.Truncated {
+		t.Errorf("total=%d truncated=%v", b.TotalTracks, b.Truncated)
+	}
+	b = Bound(&Result{Tracks: make([]Track, 40)})
+	if b.TotalTracks != 40 || !b.Truncated {
+		t.Errorf("total=%d truncated=%v", b.TotalTracks, b.Truncated)
+	}
+}
+
+func TestDescribeReportsTotalTracksOfAHostileSDP(t *testing.T) {
+	srv := startRaw(t, "sdp", sdpWithVideoTracks(1500))
+	res, err := NewRTSP().Describe(context.Background(), probeWithCreds(srv.hostPort()), 5*time.Second)
+	if err != nil {
+		t.Skipf("library rejected the SDP outright (acceptable): %v", err)
+	}
+	if len(res.Tracks) != MaxTracks || res.TotalTracks != 1500 || !res.Truncated {
+		t.Errorf("tracks=%d total=%d truncated=%v", len(res.Tracks), res.TotalTracks, res.Truncated)
+	}
+}

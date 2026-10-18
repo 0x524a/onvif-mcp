@@ -658,6 +658,12 @@ func hostileSDP(t *testing.T, n int) {
 	if n := len(d["tracks"].([]any)); n == 0 || n > probe.MaxTracks {
 		t.Errorf("tracks = %d, want 1..%d", n, probe.MaxTracks)
 	}
+	if d["total_tracks"] != float64(n) || d["tracks_truncated"] != true {
+		t.Errorf("total_tracks = %v, tracks_truncated = %v, want %d and true", d["total_tracks"], d["tracks_truncated"], n)
+	}
+	if txt := textOf(res); !strings.Contains(txt, fmt.Sprintf("has %d tracks, first %d listed", n, probe.MaxTracks)) {
+		t.Errorf("text does not say the list is cut: %s", txt)
+	}
 }
 
 func TestInspectBoundsHostileProberOutput(t *testing.T) {
@@ -896,5 +902,32 @@ func TestInspectMapsProbeBlockedAddressToTheBlockedMessage(t *testing.T) {
 	}
 	if w := wire(t, res); !strings.Contains(w, "never probes") || !strings.Contains(w, "device_fault") {
 		t.Errorf("wire = %s", w)
+	}
+}
+
+func TestInspectTextWordingForTruncatedAndCompleteTrackLists(t *testing.T) {
+	r := &probe.Result{Reachable: true, DescribeOK: true, Protocol: "rtsp", TotalTracks: 1500}
+	for i := 0; i < probe.MaxTracks; i++ {
+		r.Tracks = append(r.Tracks, probe.Track{Index: i, Type: "video", Format: "H264"})
+	}
+	env := streamSession(t, "rtsp://127.0.0.1:1/s", config.Camera{}, &captureProber{res: r})
+	res := inspect(t, env.cs, nil)
+	d := dataMap(t, res)
+	if d["total_tracks"] != float64(1500) || d["tracks_truncated"] != true {
+		t.Errorf("total_tracks=%v truncated=%v", d["total_tracks"], d["tracks_truncated"])
+	}
+	if txt := textOf(res); !strings.Contains(txt, "has 1500 tracks, first 32 listed") {
+		t.Errorf("text = %s", txt)
+	}
+
+	one := &probe.Result{Reachable: true, DescribeOK: true, Protocol: "rtsp", Tracks: []probe.Track{{Type: "video", Format: "H264"}}}
+	env = streamSession(t, "rtsp://127.0.0.1:1/s", config.Camera{}, &captureProber{res: one})
+	res = inspect(t, env.cs, nil)
+	d = dataMap(t, res)
+	if d["total_tracks"] != float64(1) || d["tracks_truncated"] != false {
+		t.Errorf("total_tracks=%v truncated=%v", d["total_tracks"], d["tracks_truncated"])
+	}
+	if txt := textOf(res); !strings.Contains(txt, "has 1 track(s)") || strings.Contains(txt, "listed") {
+		t.Errorf("text = %s", txt)
 	}
 }

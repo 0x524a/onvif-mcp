@@ -76,6 +76,10 @@ type Result struct {
 	Protocol   string  `json:"protocol,omitempty"`
 	LatencyMs  float64 `json:"latency_ms"`
 	Tracks     []Track `json:"tracks"`
+	// TotalTracks is how many tracks the stream described; Tracks holds at
+	// most MaxTracks of them, and Truncated says whether some were left out.
+	TotalTracks int  `json:"total_tracks"`
+	Truncated   bool `json:"tracks_truncated"`
 }
 
 // Prober performs an RTSP OPTIONS + DESCRIBE handshake.
@@ -260,6 +264,7 @@ func describe(ctx context.Context, u *base.URL, timeout time.Duration, lookup lo
 	}
 	res.DescribeOK = true
 	res.LatencyMs = float64(time.Since(start)) / float64(time.Millisecond)
+	res.TotalTracks = len(desc.Medias)
 	for i, m := range desc.Medias {
 		if i >= MaxTracks {
 			break
@@ -368,6 +373,8 @@ func Bound(r *Result) *Result {
 			Height: dim(t.Height),
 		})
 	}
+	out.TotalTracks = max(r.TotalTracks, len(r.Tracks), 0)
+	out.Truncated = out.TotalTracks > len(out.Tracks)
 	return out
 }
 
