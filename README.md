@@ -69,16 +69,16 @@ Go 1.25 or newer is required to build.
 ## How a move is gated
 
 ```mermaid
-flowchart LR
-    A([Agent calls ptz.goto_preset]) --> B{Server started with<br/>-enable-control?}
-    B -- no --> X1[/Tool is not registered:<br/>absent from tools/list/]
-    B -- yes --> C{Camera config has<br/>control: true?}
-    C -- no --> X2[/blocked_by_policy/]
-    C -- yes --> D{dry_run: false?}
-    D -- "no, the default" --> X3[/Validated and reported,<br/>nothing sent/]
-    D -- yes --> E{Within the rate limit?}
-    E -- no --> X4[/blocked_by_policy,<br/>retryable/]
-    E -- yes --> F([Move command sent once,<br/>never retried])
+flowchart TD
+    A([ptz.goto_preset called]) --> B{"-enable-control<br/>set at startup?"}
+    B -- no --> X1["Tool not registered,<br/>absent from tools/list"]
+    B -- yes --> C{"Camera config:<br/>control true?"}
+    C -- no --> X2["blocked_by_policy"]
+    C -- yes --> D{"dry_run false?"}
+    D -- "no (default)" --> X3["Validated and reported,<br/>nothing sent"]
+    D -- yes --> E{"Inside the<br/>rate limit?"}
+    E -- no --> X4["blocked_by_policy,<br/>retryable"]
+    E -- yes --> F(["Move sent once,<br/>never retried"])
 ```
 
 Each gate is checked by the server, not requested from the model. Every attempt, allowed or
