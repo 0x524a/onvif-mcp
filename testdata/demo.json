@@ -1,0 +1,11 @@
+{
+  "cameras": {
+    "vcam": {
+      "endpoint": "http://127.0.0.1:18080/onvif/device_service",
+      "username": "demo",
+      "password": "demo-pass-1234",
+      "timeout_seconds": 10,
+      "control": true
+    }
+  }
+}

@@ -5,7 +5,10 @@ control as typed, safe tools an LLM agent can call.
 
 ## Status
 
-v0.1 is in development. The tool surface below is filled in as each phase lands.
+v0.1.0 is the first release candidate: eleven tools, ten of them read-only, over stdio.
+It is tested against onvif-go's virtual camera and has not been verified against physical
+cameras, whose quirks it may not yet handle. The server is read-only unless the operator
+starts it with `-enable-control` **and** a camera opts in with `"control": true`.
 
 ## Install
 
@@ -13,7 +16,13 @@ v0.1 is in development. The tool surface below is filled in as each phase lands.
 go install github.com/0x524a/onvif-mcp/cmd/onvif-mcp@latest
 ```
 
-Requires Go 1.25 or newer. The command is not published until the first release.
+Requires Go 1.25 or newer. The module has no published release yet, so until one exists
+build from a clone:
+
+```bash
+git clone <this repository> && cd onvif-mcp
+go build -o onvif-mcp ./cmd/onvif-mcp
+```
 
 ## Configure
 
@@ -21,6 +30,17 @@ Cameras are declared in a JSON config file addressed by operator-chosen IDs. Cre
 live in the config file or the environment, never in tool arguments. Each camera must opt
 in to control (`"control": true`), and control tools stay disabled unless the server is
 started with `-enable-control`.
+
+Fields of each camera entry (the entry's key is the camera id an agent passes as `camera`):
+
+| Field | Meaning |
+|-------|---------|
+| `endpoint` | The camera's ONVIF device service URL. Required. |
+| `username`, `password` | Camera credentials. The password may instead come from the environment variable `ONVIF_MCP_<ID>_PASSWORD` (id upper-cased, `-` and `.` as `_`), which takes precedence over the file. |
+| `timeout_seconds` | Per-request timeout in seconds, up to 300. Default 10. |
+| `control` | Opt this camera in to write tools. Default `false`. Has no effect unless the server also runs with `-enable-control`. |
+| `trust_advertised_hosts` | Allow service, stream and snapshot addresses on another host than `endpoint`. Default `false`; see below. |
+| `allow_basic_over_http` | Allow `camera.snapshot` to answer a Basic-only challenge over plain `http`. Default `false`; see "Snapshots". |
 
 A documentation-only example is in [testdata/cameras.example.json](testdata/cameras.example.json),
 using the reserved address `192.0.2.10` and `REPLACE_ME` credentials. Copy it, edit it, and
@@ -244,10 +264,106 @@ own client inside the registry instead:
   size limit must allow that.
 - The snapshot address and the credentials never appear in the input or output.
 
+## Try it without a camera
+
+`make demo` needs no hardware. It builds and starts `cmd/demo-camera`, a virtual ONVIF camera
+(onvif-go's `server` package) listening on `127.0.0.1:18080`, then runs onvif-mcp on your
+terminal's stdio against [testdata/demo.json](testdata/demo.json). The camera is a separate
+process because nothing but JSON-RPC may reach the server's stdout. The demo credentials in
+that file belong to a simulator reachable only from your own machine; they are not secrets and
+must not be reused. Git does not keep file modes, so `make demo` copies the config to a
+private temporary file with mode 600 first. Stdin ending (ctrl-d) stops both processes.
+
+**Control is off unless `-enable-control` is passed and the camera sets `"control": true`.**
+With control off, `ptz.goto_preset` does not appear in `tools/list` at all. The demo turns
+both on (the flag in the Makefile, `"control": true` in `demo.json`) so you can see a move.
+To see the read-only server instead (ten tools), start `go run ./cmd/demo-camera` in one
+terminal and run onvif-mcp without `-enable-control` against a mode-600 copy of `demo.json`.
+
+Run `make demo`, then paste these lines one at a time into the terminal, waiting for each
+reply (calls sent together run concurrently and may finish out of order, and ending stdin
+abandons any call still running). The tokens below are the virtual camera's fixed ones.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"demo","version":"0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+```
+
+1. `camera.list` gives the camera id:
+
+   ```json
+   {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"camera.list","arguments":{}}}
+   ```
+   ```text
+   data.cameras = [{"control_allowed":true,"endpoint":"http://127.0.0.1:18080/onvif/device_service","id":"vcam"}]
+   ```
+   (`control_allowed` is the camera's own opt-in; the server-wide flag is reported by the
+   `onvif://server/policy` resource.)
+
+2. `media.profiles` gives a profile token; `profile_0` and `profile_2` have PTZ:
+
+   ```json
+   {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"media.profiles","arguments":{"camera":"vcam"}}}
+   ```
+   ```text
+   3 profile(s): profile_0 (H264 1920x1080, PTZ, source=video_source_0); profile_1 (H264 1280x720, source=video_source_1); profile_2 (H264 1920x1080, PTZ, source=video_source_2).
+   ```
+
+3. `ptz.presets` gives a preset token:
+
+   ```json
+   {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ptz.presets","arguments":{"camera":"vcam","profile":"profile_0"}}}
+   ```
+   ```text
+   data.presets = [{"name":"Home","pan":0,"tilt":0,"token":"preset_0","zoom":0},
+                   {"name":"Entrance","pan":-45,"tilt":-10,"token":"preset_1","zoom":0.5}]
+   ```
+
+4. `ptz.goto_preset` with no `dry_run` field is a dry run. It validates and reports the
+   target; nothing is sent to the camera:
+
+   ```json
+   {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ptz.goto_preset","arguments":{"camera":"vcam","profile":"profile_0","preset":"preset_1"}}}
+   ```
+   ```text
+   data = {"dry_run":true,"executed":false,"preset":"preset_1","preset_name":"Entrance","profile":"profile_0",
+           "target_pan":-45,"target_tilt":-10,"target_zoom":0.5,
+           "note":"Dry run: nothing was sent and the camera did not move. To move it, call ptz.goto_preset again with the same arguments and dry_run false. Movement limits not reported."}
+   ```
+
+5. The same call with `"dry_run":false` moves the camera:
+
+   ```json
+   {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"ptz.goto_preset","arguments":{"camera":"vcam","profile":"profile_0","preset":"preset_1","dry_run":false}}}
+   ```
+   ```text
+   data = {"dry_run":false,"executed":true,"preset":"preset_1","preset_name":"Entrance","profile":"profile_0",
+           "target_pan":-45,"target_tilt":-10,"target_zoom":0.5,
+           "note":"The camera returned HTTP success for the move command; that does not confirm it accepted it, and it may still be moving. Call ptz.status to confirm where it is."}
+   ```
+
+6. `ptz.status` confirms where the camera is (a moment later it reports `IDLE`; immediately
+   after the move it can still report `MOVING`):
+
+   ```json
+   {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"ptz.status","arguments":{"camera":"vcam","profile":"profile_0"}}}
+   ```
+   ```text
+   data = {"pan":-45,"tilt":-10,"zoom":0.5,"pan_tilt_state":"IDLE","zoom_state":"IDLE"}
+   ```
+
+Each real and dry attempt is also written to the server's stderr as an audit line. Run
+`make demo` again to start the camera back at pan 0, tilt 0.
+
 ## Scope / what this does not do
 
 onvif-mcp deliberately exposes a small surface. It does **not**:
 
+- Speak anything but stdio. There is no HTTP transport, no authentication of MCP clients
+  and no multi-user mode: whoever can write to the server's stdin can use every tool the
+  operator enabled.
+- Prove it works on real cameras. It is exercised against onvif-go's virtual camera only;
+  vendor quirks, partial ONVIF profiles and unusual firmware are untested.
 - Subscribe to or pull ONVIF events. The client library supports PullPoint, but the
   virtual camera used for testing implements no events service, so it cannot be
   covered without hardware.
