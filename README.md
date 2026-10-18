@@ -154,7 +154,9 @@ onvif-mcp -config cameras.json -enable-control
   H.264 and H.265 video the width and height). Resolution is parsed from the stream's own
   parameter sets and is best-effort; a track without it has no width or height. The result
   names the stream as scheme, host, port and path only. `timeout_seconds` defaults to 5 and is
-  clamped to 10. Credentials never appear in its input or output (see below).
+  clamped to 10; it is independent of the camera's own `timeout_seconds` config setting. A
+  stream that answers with an RTSP redirect is not followed (`device_fault`). Credentials never
+  appear in its input or output (see below).
 - `camera.discover` blocks for its whole probe window (3 s by default, 10 s at most). The
   underlying library checks for cancellation only between packets, so a cancel or shutdown
   waits out the rest of the window. A host with no usable network interface fails with
@@ -179,6 +181,9 @@ RTSP URL itself, inside the server process, and only under these rules:
   streams are probed, **without credentials** (`authenticated` is false). Unspecified,
   multicast, broadcast and link-local addresses (including 169.254.169.254) and numeric host
   spellings are refused even then.
+- The probe's client may open one connection, to the single address of the URL (resolved
+  once), and never follows an RTSP redirect: a 3xx from the stream is an error, so a stream
+  cannot steer the credentials, or the probe, to another host or port.
 - The credentialed URL is never returned, logged or placed in an error. It lives in an
   unprintable registry type that only this tool can reach, and every output passes the
   redactor.

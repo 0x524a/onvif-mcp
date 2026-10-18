@@ -101,7 +101,8 @@ func refusalError(camera string, err error) *mcperr.ToolError {
 				"trust_advertised_hosts is set; nothing was probed")
 	default:
 		return streamFault(camera, "camera advertised a stream address that is not a usable rtsp or rtsps URL",
-			"the scheme must be rtsp or rtsps and any port 1 to 65535; nothing was probed; "+profilesHint)
+			"the scheme must be rtsp or rtsps and any port 1 to 65535; nothing was probed; "+
+				"media.stream_uri shows the address the camera advertised")
 	}
 }
 
@@ -115,13 +116,17 @@ type scrubbedStreamErr struct {
 func (e *scrubbedStreamErr) Error() string { return e.msg }
 func (e *scrubbedStreamErr) Unwrap() error { return e.err }
 
+// inspectSummary is the text content block. It must survive redact.Scrub
+// unchanged: a word such as "credentials" followed by a colon reads as a
+// key/value secret and would replace the rest of the line, track list
+// included, so the auth state sits in parentheses and no colon follows it.
 func inspectSummary(d InspectData) string {
-	auth := "without credentials"
+	auth := "probed without credentials"
 	if d.Authenticated {
-		auth = "with the camera's credentials"
+		auth = "probed with the camera's credentials"
 	}
 	if !d.DescribeOK {
-		return fmt.Sprintf("Stream %s: connected %s but it gave no usable description.", d.Stream, auth)
+		return fmt.Sprintf("Stream %s connected (%s) but it gave no usable description.", d.Stream, auth)
 	}
 	parts := make([]string, 0, len(d.Tracks))
 	for _, t := range d.Tracks {
@@ -135,10 +140,42 @@ func inspectSummary(d InspectData) string {
 		parts = append(parts, s)
 	}
 	if len(parts) == 0 {
-		return fmt.Sprintf("Stream %s: described %s with no tracks.", d.Stream, auth)
+		return fmt.Sprintf("Stream %s was described (%s) with no tracks.", d.Stream, auth)
 	}
-	return fmt.Sprintf("Stream %s probed %s: %d track(s): %s. Resolution is best-effort.",
-		d.Stream, auth, len(parts), joinWithin(parts, "; ", maxTextChars-160, len(parts)))
+	return fmt.Sprintf("Stream %s has %d track(s) (%s): %s. Resolution is best-effort.",
+		d.Stream, len(parts), auth, joinWithin(parts, "; ", maxTextChars-160, len(parts)))
+}
+
+// streamHints adds the recovery advice mcperr cannot know: it depends on
+// whether credentials were offered and on the timeout in force. The hints
+// contain no colon (see inspectSummary) and no address.
+func streamHints(te *mcperr.ToolError, err error, authenticated bool, secs int) *mcperr.ToolError {
+	switch {
+	case errors.Is(err, probe.ErrRedirected):
+		te.Code = mcperr.CodeDeviceFault
+		te.Retryable = te.Code.Retryable()
+		te.Hint = "the stream answered with an RTSP redirect, which onvif-mcp never follows because it could send " +
+			"the camera's credentials to another host; media.stream_uri shows the address the camera advertised"
+	case errors.Is(err, probe.ErrEndedDuringDescribe):
+		if authenticated {
+			te.Hint = "the stream ended the connection during DESCRIBE; the camera's stream credentials may be wrong, " +
+				"or the stream closed the connection for another reason"
+		} else {
+			te.Hint = "the stream ended the connection during DESCRIBE without credentials; it may require them " +
+				"or be overloaded"
+		}
+	case te.Code == mcperr.CodeAuthFailed && !authenticated:
+		te.Hint = "the stream requires credentials, none were offered because it is on another host than the " +
+			"camera's configured address, and onvif-mcp never sends the camera's credentials to another host"
+	case te.Code == mcperr.CodeTimeout:
+		te.Hint = fmt.Sprintf("the stream did not answer within %d s; the wait is capped at %d s, so retry once "+
+			"(optionally with a larger timeout_seconds, at most %d) and check that the camera is streaming",
+			secs, maxStreamSeconds, maxStreamSeconds)
+	case te.Code == mcperr.CodeNotFound:
+		te.Hint = "the stream server answered but has nothing at this path, so the path may be wrong; " +
+			"media.stream_uri shows the address the camera advertised and media.profiles lists the profiles"
+	}
+	return te
 }
 
 func trackInfos(r *probe.Result) []TrackInfo {
@@ -174,7 +211,9 @@ func RegisterStream(srv *mcp.Server, d Deps) {
 			"or the result, and they are offered only to the camera's own host: if the camera advertises a stream " +
 			"on another host the call is refused as device_fault without probing, unless the operator set " +
 			"trust_advertised_hosts for the camera, in which case that host is probed without credentials. " +
-			"authenticated says which. timeout_seconds defaults to 5 and is clamped to 10. At most 32 tracks " +
+			"authenticated says which. timeout_seconds defaults to 5 and is clamped to 10; it is independent of " +
+			"the camera's own timeout_seconds setting. A stream that answers with an RTSP redirect is not " +
+			"followed and is reported as device_fault. At most 32 tracks " +
 			"are listed. It connects to a stream endpoint, which is not the ONVIF service, so it is open-world. " +
 			"Does not fetch frames, does not record, does not play or time the video, and does not change " +
 			"the camera.",
@@ -240,7 +279,7 @@ func inspectStream(ctx context.Context, d Deps, prober probe.Prober, in StreamIn
 	if err != nil {
 		// Scrubbed here as well as by the prober, and again by the sanitiser.
 		clean := &scrubbedStreamErr{msg: sp.Scrub(err.Error()), err: err}
-		return fail[InspectData](mcperr.FromStreamError(clean, in.Camera, streamOp))
+		return fail[InspectData](streamHints(mcperr.FromStreamError(clean, in.Camera, streamOp), err, sp.Authenticated(), secs))
 	}
 	if res == nil {
 		return fail[InspectData](mcperr.FromStreamError(errors.New("stream probe returned no data"), in.Camera, streamOp))
