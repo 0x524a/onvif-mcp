@@ -125,7 +125,7 @@ func Load(path string) (*Config, error) {
 		return nil, ErrNotRegular
 	}
 	if st.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("%w: %s has mode %v", ErrConfigPermissions, path, st.Mode().Perm())
+		return nil, fmt.Errorf("%w: %s has mode %v; run: chmod 600 %s", ErrConfigPermissions, path, st.Mode().Perm(), path)
 	}
 
 	b, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
@@ -140,13 +140,13 @@ func Load(path string) (*Config, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
-		return nil, parseError(err)
+		return nil, parseError(err, b)
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, errors.New("parse config: unexpected data after the top-level object")
 	}
 	if dup, err := duplicateCameraID(b); err != nil {
-		return nil, parseError(err)
+		return nil, parseError(err, b)
 	} else if dup != "" {
 		return nil, fmt.Errorf("camera ID %q is defined more than once", redact.Scrub(dup))
 	}
@@ -203,24 +203,107 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// parseError turns a JSON error into one that cannot quote config values.
-func parseError(err error) error {
+// parseError turns a JSON error into one that cannot quote config values. b is
+// the file's bytes, used to find the offset of an unexpected end and to name
+// the camera an error is in.
+func parseError(err error, b []byte) error {
 	var syn *json.SyntaxError
 	var typ *json.UnmarshalTypeError
 	switch {
 	case errors.As(err, &syn):
 		return fmt.Errorf("parse config: invalid JSON at byte %d", syn.Offset)
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return fmt.Errorf("parse config: invalid JSON at byte %d (the file ends too soon)", len(b))
 	case strings.HasPrefix(err.Error(), "json: unknown field "):
 		name, uerr := strconv.Unquote(strings.TrimPrefix(err.Error(), "json: unknown field "))
 		if uerr != nil || len(name) > 64 {
 			return errors.New("parse config: unknown field")
 		}
+		if id := cameraWithKey(b, name); id != "" {
+			return fmt.Errorf("parse config: camera %q has an unknown field %q", id, redact.Scrub(name))
+		}
 		return fmt.Errorf("parse config: unknown field %q", redact.Scrub(name))
 	case errors.As(err, &typ):
+		field := typ.Field
+		if i := strings.LastIndexByte(field, '.'); i >= 0 {
+			field = field[i+1:]
+		}
+		if id := cameraAtOffset(b, typ.Offset); id != "" {
+			return fmt.Errorf("parse config: camera %q: field %q has the wrong type (expected %s)", id, redact.Scrub(field), typ.Type)
+		}
 		return fmt.Errorf("parse config: field %q has the wrong type (expected %s)", redact.Scrub(typ.Field), typ.Type)
 	default:
 		return errors.New("parse config: malformed JSON")
 	}
+}
+
+// walkCameras calls fn for every camera entry of the top-level "cameras"
+// object of already-parsed JSON: the id, the offset just after its key, and
+// its raw value. fn returns false to stop. Errors end the walk silently: this
+// only improves messages.
+func walkCameras(b []byte, fn func(id string, keyEnd int64, val json.RawMessage) bool) {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if _, err := dec.Token(); err != nil {
+		return
+	}
+	for dec.More() {
+		kt, err := dec.Token()
+		if err != nil {
+			return
+		}
+		if key, _ := kt.(string); key != "cameras" {
+			var skip json.RawMessage
+			if dec.Decode(&skip) != nil {
+				return
+			}
+			continue
+		}
+		if d, err := dec.Token(); err != nil {
+			return
+		} else if dl, ok := d.(json.Delim); !ok || dl != '{' {
+			continue
+		}
+		for dec.More() {
+			it, err := dec.Token()
+			if err != nil {
+				return
+			}
+			id, _ := it.(string)
+			end := dec.InputOffset()
+			var val json.RawMessage
+			if dec.Decode(&val) != nil || !fn(id, end, val) {
+				return
+			}
+		}
+		return
+	}
+}
+
+// cameraWithKey returns the first camera whose entry has a key called name.
+func cameraWithKey(b []byte, name string) (found string) {
+	walkCameras(b, func(id string, _ int64, val json.RawMessage) bool {
+		var m map[string]json.RawMessage
+		if json.Unmarshal(val, &m) == nil {
+			if _, ok := m[name]; ok {
+				found = id
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// cameraAtOffset returns the camera whose entry contains byte offset off.
+func cameraAtOffset(b []byte, off int64) (found string) {
+	walkCameras(b, func(id string, keyEnd int64, _ json.RawMessage) bool {
+		if keyEnd < off {
+			found = id
+			return true
+		}
+		return false
+	})
+	return found
 }
 
 // hasUserinfo reports whether the authority part of endpoint contains '@'.
