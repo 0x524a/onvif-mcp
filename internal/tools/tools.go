@@ -44,6 +44,11 @@ type Deps struct {
 	// an in-process RTSP server. It sees the credentialed URL, so it must be
 	// trusted code; it is not a place to add credential access for other tools.
 	Prober probe.Prober
+	// SnapshotMaxBytes caps one camera.snapshot image, in raw bytes. Zero or
+	// negative means DefaultSnapshotMaxBytes. The operator's value is range
+	// checked by CheckSnapshotMaxBytes where the flag is read, not here, so
+	// tests can use a tiny cap.
+	SnapshotMaxBytes int
 }
 
 // Scope returns a context cancelled when either ctx or d.Base is done.
