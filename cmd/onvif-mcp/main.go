@@ -57,6 +57,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 
 	if *cfgPath == "" {
 		log.Error("missing required flag: -config")
+		_, _ = fmt.Fprintln(stderr, "usage: onvif-mcp -config <path> [-enable-control]   (the config file must be mode 600; see the README)")
 		return 2
 	}
 	cfg, err := config.Load(*cfgPath)

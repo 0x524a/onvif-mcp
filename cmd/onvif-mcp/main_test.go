@@ -111,6 +111,13 @@ func TestMissingConfigFlagExits2(t *testing.T) {
 	}
 }
 
+func TestMissingConfigFlagPrintsAOneLineUsage(t *testing.T) {
+	_, se, _ := runBin(t)
+	if !strings.Contains(se, "usage: onvif-mcp -config <path> [-enable-control]") {
+		t.Errorf("stderr = %q, want a usage line", se)
+	}
+}
+
 func TestLoosePermissionsExit1(t *testing.T) {
 	p := writeConfig(t, 0o644, "http://192.0.2.10/onvif/device_service", "u", "hunter2-secret")
 	so, se, code := runBin(t, "-config", p)
