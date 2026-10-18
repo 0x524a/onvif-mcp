@@ -400,7 +400,9 @@ func RegisterSnapshot(srv *mcp.Server, d Deps) {
 			"advertises its snapshot address on another host the call is refused as device_fault without any " +
 			"request, unless the operator set trust_advertised_hosts for the camera, in which case that " +
 			"host is fetched without credentials (so it must serve snapshots unauthenticated). Redirects are " +
-			"not followed. Anything that is not a valid JPEG or PNG, such as a login page, is refused as " +
+			"not followed. Over plain http the password is never sent for a Basic-only challenge unless the " +
+			"operator set allow_basic_over_http for the camera (auth_failed otherwise); Digest and https need " +
+			"no setting. At most a few snapshots run at once; if busy, wait and call again. Anything that is not a valid JPEG or PNG, such as a login page, is refused as " +
 			"device_fault. A camera without snapshot support gives not_supported. Does not record or stream " +
 			"video, does not move the camera, and does not change anything; use stream.inspect for codecs.",
 		InputSchema: snapshotSchema(),

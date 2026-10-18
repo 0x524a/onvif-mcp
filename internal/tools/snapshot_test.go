@@ -354,7 +354,7 @@ func TestSnapshotToolDeclaration(t *testing.T) {
 		a.DestructiveHint == nil || *a.DestructiveHint || a.OpenWorldHint == nil || !*a.OpenWorldHint {
 		t.Errorf("annotations = %+v", a)
 	}
-	for _, want := range []string{"Use this after media.profiles", "1 MiB", "trust_advertised_hosts", "Does not record or stream video", "does not move the camera", "never appear"} {
+	for _, want := range []string{"Use this after media.profiles", "1 MiB", "trust_advertised_hosts", "Does not record or stream video", "does not move the camera", "never appear", "allow_basic_over_http"} {
 		if !strings.Contains(tool.Description, want) {
 			t.Errorf("description lacks %q", want)
 		}

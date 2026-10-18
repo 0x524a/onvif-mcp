@@ -89,7 +89,7 @@ usage error such as an unknown flag or a missing `-config`.
 | `media.profiles` | Media profiles and whether each has PTZ | read-only |
 | `media.stream_uri` | Stream URI for a profile, credentials removed | read-only |
 | `stream.inspect` | Open a profile's RTSP stream and report codecs, tracks and best-effort resolution | read-only, open-world |
-| `camera.snapshot` | Capture one still image from a profile and return it inline | read-only |
+| `camera.snapshot` | Capture one still image from a profile and return it inline | read-only, open-world |
 | `imaging.settings` | Current imaging settings of a video source | read-only |
 | `ptz.status` | Current PTZ position and movement state | read-only |
 | `ptz.presets` | Stored presets and reported movement limits | read-only |
@@ -210,23 +210,38 @@ own client inside the registry instead:
   refused as `device_fault` with **no request sent**; with `trust_advertised_hosts` it is
   fetched **without credentials** (so it must serve snapshots unauthenticated). Unspecified,
   multicast, broadcast and link-local addresses, numeric host spellings, and names that
-  resolve to them are refused even then.
+  resolve to them are refused even then. That list includes the IPv4 address inside a NAT64,
+  6to4 or IPv4-compatible IPv6 address, and the cloud metadata addresses `fd00:ec2::254`,
+  `100.100.100.200` and `192.0.0.192`. A name with a trailing dot is not the camera's host.
 - The host is resolved once and the connection goes to that address only. Redirects are never
   followed (a 3xx is `device_fault`); keep-alive, proxies and transparent decompression are off.
 - The camera's credentials are sent only to the camera's own host, only after it answers 401,
   and by the method it asks for: Digest if offered, otherwise Basic. One authenticated retry;
-  a second 401 is `auth_failed`. Basic is the camera's choice and sends the password in the
-  clear over plain `http`, as most cameras' web servers allow; prefer an `https` snapshot
-  address or Digest where the camera offers them. An on-path attacker on an `http` camera
-  link can request Basic instead of Digest; onvif-mcp does not defend against that.
+  a second 401 is `auth_failed`. A camera configured with an `https` endpoint that advertises
+  an `http` snapshot address is refused with no request sent. **Basic over plain `http` is
+  refused** (`auth_failed`, the password is not sent), because it would put the password on the
+  wire in the clear and an on-path attacker can turn a Digest challenge into a Basic one. An
+  operator whose camera offers nothing else, on a network they trust, sets
+  `"allow_basic_over_http": true` for that camera. Digest, and Basic over `https`, need no
+  setting. An `https` snapshot address must present a certificate that verifies; there is no
+  option to skip the check, and a failure is `device_fault` for the operator to fix.
 - The body is read through a hard limit of the cap plus one byte, so an endless or 2 GB reply
   is never buffered, and a declared length over the cap is refused before any body is read.
 - The image type is decided from the bytes, never from the reply's `Content-Type`. Only JPEG
   and PNG are returned. An HTML login page, SVG, text, GIF, WebP or anything else is
   `device_fault` ("the snapshot address did not return an image") and the reply is not shown.
-  The header is parsed for its size, and an image over 16384 pixels on a side or 64 megapixels
-  is refused. The pixels are not decoded, so a truncated image with a valid header is returned
-  as it came.
+  Trailing zero bytes are trimmed, a JPEG must reach its end-of-image marker and a PNG its
+  IEND chunk (a truncated frame is `device_fault`), and anything after that is cut, so the
+  result is the image alone. The header is parsed for its size, and an image over 16384 pixels
+  on a side or 64 megapixels is refused. The pixels are not decoded.
+- A reply that is not valid HTTP is `device_fault`, not an internal error.
+- At most 4 snapshots (2 when the cap is above 2 MiB) are fetched at once, because each holds
+  the image in memory several times over. A call that cannot get a slot within 2 seconds fails
+  with a retryable `timeout`; take snapshots one after another.
+- **The response line is about 4/3 of the cap** plus a small overhead, because the image is
+  base64 encoded in the JSON-RPC reply: about 11 MB at the 8 MiB maximum. The 4 MiB line limit
+  applies to requests the server reads, not to its replies, so the client's own line or message
+  size limit must allow that.
 - The snapshot address and the credentials never appear in the input or output.
 
 ## Scope / what this does not do
@@ -247,6 +262,9 @@ onvif-mcp deliberately exposes a small surface. It does **not**:
   context window; the size cap (default 1 MiB, `-snapshot-max-bytes`) is the only control. It
   does not resize, re-encode or crop, and it does not return a link instead, because a stdio
   server has nothing to serve one from.
+- Send the camera's password in the clear by default. `camera.snapshot` will not answer a
+  Basic-only challenge over plain `http` unless that camera sets `allow_basic_over_http`, and
+  it will not use credentials for an `http` snapshot address of an `https` camera at all.
 - Stay inside the ONVIF service. `stream.inspect` is open-world: it connects to a stream
   endpoint, which is a separate service from the camera's ONVIF one, and `camera.snapshot`
   makes an HTTP request to the camera's snapshot address, which is often a different port.
