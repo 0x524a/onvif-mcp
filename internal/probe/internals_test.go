@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/0x524A/rtspeek/pkg/rtspeek"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
 )
 
@@ -175,4 +176,13 @@ func TestSuccessfulProbeLeavesNoGoroutineBehind(t *testing.T) {
 		}
 	}
 	goroutinesBackTo(t, base)
+}
+
+func TestURLWithoutAHostIsInvalid(t *testing.T) {
+	for _, u := range []string{"rtsp:///x", "rtsp:x", "http://h/x", "ftp://h/x"} {
+		_, err := NewRTSP().Describe(context.Background(), u, time.Second)
+		if !errors.Is(err, rtspeek.ErrInvalidURL) {
+			t.Errorf("%s: err = %v, want ErrInvalidURL", u, err)
+		}
+	}
 }

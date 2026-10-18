@@ -238,20 +238,20 @@ func TestStreamProbeScrubRemovesEveryFormOfTheSecret(t *testing.T) {
 }
 
 func TestStreamProbeScrubRemovesEncodedAndCasedEchoes(t *testing.T) {
-	// The user name is not a multiple of three bytes long, so the base64 of
+	// The user name plus colon is not a multiple of three bytes long, so the base64 of
 	// "user:pass" does not contain the base64 of "pass". Passwords of varying
 	// length give padded and unpadded forms, and '?' and '>' put '+' and '/'
 	// in the standard alphabet and '-' and '_' in the URL one.
 	for k := 1; k <= 5; k++ {
 		for _, tail := range []string{"", "a", "ab"} {
 			pw := "zqxv-" + strings.Repeat("?>", k) + "Mixed" + tail
-			e := streamEntry(config.Camera{Username: "admin", Password: pw})
+			e := streamEntry(config.Camera{Username: "root", Password: pw})
 			sp, err := e.PrepareStream("rtsp://192.0.2.10/s")
 			if err != nil {
 				t.Fatal(err)
 			}
 			var echoes []string
-			for _, raw := range []string{"admin:" + pw, pw} {
+			for _, raw := range []string{"root:" + pw, pw} {
 				for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
 					echoes = append(echoes, enc.EncodeToString([]byte(raw)))
 				}
