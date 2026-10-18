@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/0x524a/onvif-mcp/internal/mcperr"
+	"github.com/0x524a/onvif-mcp/internal/probe"
 	"github.com/0x524a/onvif-mcp/internal/redact"
 	"github.com/0x524a/onvif-mcp/internal/registry"
 	"github.com/0x524a/onvif-mcp/internal/safety"
@@ -38,6 +39,11 @@ type Deps struct {
 	// Policy gates write tools. Nil means read-only: GuardedTool registers no
 	// write tool and the guard refuses everything.
 	Policy *safety.Policy
+	// Prober performs the RTSP handshake for stream.inspect. Nil means the
+	// real prober (probe.NewRTSPeek). It is injectable so tests use a fake or
+	// an in-process RTSP server. It sees the credentialed URL, so it must be
+	// trusted code; it is not a place to add credential access for other tools.
+	Prober probe.Prober
 }
 
 // Scope returns a context cancelled when either ctx or d.Base is done.
