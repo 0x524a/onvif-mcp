@@ -3,6 +3,7 @@ package registry
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"errors"
 	"io"
 	"net"
@@ -47,14 +48,28 @@ func TestSnapshotSchemeDowngradeIsRefusedWithoutAnyRequest(t *testing.T) {
 	}
 }
 
-func TestSnapshotHTTPSEndpointHTTPSSnapshotStillAuthenticates(t *testing.T) {
-	// https snapshot on a TLS server is covered by the tools tests; here only
-	// the policy: https to https is not a downgrade.
-	e := snapEntry(config.Camera{Endpoint: "https://127.0.0.1/onvif/device_service"})
-	_, err := fetch(t, e, "https://127.0.0.1:1/s", 1<<20)
-	var ref *SnapshotRefusal
-	if errors.As(err, &ref) {
-		t.Fatalf("https to https was refused: %v", err)
+// Basic over https is fine without any opt-in: the password is encrypted.
+func TestSnapshotBasicOverHTTPSNeedsNoOptIn(t *testing.T) {
+	var l reqLog
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		l.note(r)
+		if _, _, ok := r.BasicAuth(); !ok {
+			w.Header().Set("WWW-Authenticate", `Basic realm="x"`)
+			w.WriteHeader(401)
+			return
+		}
+		_, _ = w.Write(testJPEG(t, 4, 4))
+	}))
+	t.Cleanup(ts.Close)
+	pool := x509.NewCertPool()
+	pool.AddCert(ts.Certificate())
+	snapshotTLSRoots = pool
+	t.Cleanup(func() { snapshotTLSRoots = nil })
+	_, port, _ := net.SplitHostPort(ts.Listener.Addr().String())
+	e := snapEntryStrict(config.Camera{Endpoint: "https://127.0.0.1/onvif/device_service"})
+	got, err := fetch(t, e, "https://127.0.0.1:"+port+"/s", 1<<20)
+	if err != nil || !got.Authenticated {
+		t.Fatalf("err=%v authenticated=%v", err, got.Authenticated)
 	}
 }
 

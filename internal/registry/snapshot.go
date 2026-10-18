@@ -164,6 +164,10 @@ const (
 	maxHeaderBytes    = 16 << 10
 )
 
+// snapshotTLSRoots is nil in production, which means the system roots. Tests
+// set it to trust their own server certificate.
+var snapshotTLSRoots *x509.CertPool
+
 // lookupHost resolves a name for FetchSnapshot; tests replace it to prove the
 // name is resolved once and the connection goes to that answer.
 var lookupHost = func(ctx context.Context, host string) ([]netip.Addr, error) {
@@ -276,7 +280,7 @@ func (e Entry) FetchSnapshot(ctx context.Context, rawURI string, limit int64, ti
 		DisableKeepAlives:      true,
 		DisableCompression:     true, // no Accept-Encoding, and a gzip reply is never inflated
 		MaxResponseHeaderBytes: maxHeaderBytes,
-		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: snapshotTLSRoots},
 		// No Proxy: an HTTP_PROXY in the environment must not divert a
 		// request that may carry credentials.
 	}
