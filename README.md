@@ -64,9 +64,11 @@ onvif-mcp -config cameras.json
 | `-enable-control` | Permit state-changing tools (each camera must also opt in). |
 | `-version` | Print the version to stdout and exit without starting the server. |
 
-Write tools are rate limited per camera: one movement per 2 seconds, burst 1. These are
-code defaults (`safety.PolicyOptions`), and v0.1 has no flag or config key to change them;
-`onvif://server/policy` reports the values in force.
+Write tools are rate limited per device: one movement per 2 seconds, burst 1. The budget is
+keyed by the camera's endpoint (case, scheme, default port and a trailing slash are
+ignored), so two config entries that point at the same endpoint share one budget. These
+are code defaults (`safety.PolicyOptions`), and v0.1 has no flag or config key to change
+them; `onvif://server/policy` reports the values in force.
 
 The server speaks MCP over stdio: stdout carries only JSON-RPC, and all logging goes to
 stderr. Exit codes: 0 on a clean shutdown (stdin closed, SIGINT or SIGTERM), 1 for a
@@ -105,13 +107,25 @@ Three independent gates stand between an agent and a moving motor:
    movement limits, but never sends the move command. It says exactly what to send to
    move.
 
-A real call is rate limited per camera (see above), sends the move command once and never
-retries it. The camera accepts the command and may still be moving when the call returns;
-`ptz.status` shows where it is. If a real call times out or faults after the command was
+A real call is rate limited (see above), sends the move command once and never retries it.
+A call that fails before anything is sent (a mistyped token, an unreachable camera, a
+cancellation) gives its budget back and is audited as not executed. When the call
+succeeds, the camera returned HTTP success; the library does not parse the reply, so that
+does not prove the camera accepted the command, and it may still be moving. `ptz.status`
+shows where it is. If a real call times out or faults after the command was
 sent, the camera may or may not have moved: the error says so, is not marked retryable, and
-the agent should check `ptz.status` before trying again. Every attempt, dry or real, and
+the agent should check `ptz.status` before trying again. The same holds for any other
+failure after the send, such as a reply that is not SOAP. Dry runs are not rate limited,
+but each costs several round trips to the camera (connect, profiles, presets, limits), so
+an agent looping on them still loads it. Validation as a whole is held to twice the
+camera's `timeout_seconds`. Every attempt, dry or real, and
 every refusal is written to stderr with the tool, camera, dry-run state, whether it executed,
 the outcome and the preset token. Arguments and credentials are never logged.
+
+v0.1 performs no clamping. The target is a preset the camera stored itself, so it is
+reachable by construction; `reported_limits` is informational and is never compared with
+the target. When absolute or relative moves are added, a camera that reports no limits will
+fail closed rather than fall back to a guessed range.
 
 To enable it for one camera:
 
@@ -148,7 +162,7 @@ onvif-mcp deliberately exposes a small surface. It does **not**:
   virtual camera used for testing implements no events service, so it cannot be
   covered without hardware.
 - Perform continuous, relative, or absolute PTZ movement. Only `ptz.goto_preset`
-  moves a camera, because a preset is a bounded target the device itself stored.
+  moves a camera, because a preset is a target the camera itself stored.
 - Change imaging settings, reboot a device, manage users, or alter network
   configuration.
 - Serve video. It reports stream URIs and inspects stream metadata; it never
