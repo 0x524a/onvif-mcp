@@ -169,3 +169,28 @@ func TestHTTPBodyNeverEchoedInMessage(t *testing.T) {
 		t.Errorf("message = %q", te.Message)
 	}
 }
+
+// The camera's reply body is not evidence: no word in it may choose the class.
+func TestReplyBodyDoesNotSteerClassification(t *testing.T) {
+	for _, body := range []string{
+		"<html>unauthorized</html>", "unauthorized", "authentication failed",
+		"<html>not found</html>", "not found", "no such preset", "NoEntity",
+		"connection refused", "i/o timeout",
+	} {
+		err := fmt.Errorf("failed to send HTTP request: HTTP request failed with status 500: %s", body)
+		te := FromError(err, "cam", "GotoPreset")
+		if te.Code != CodeInternal {
+			t.Errorf("body %q: code = %s, want internal", body, te.Code)
+		}
+	}
+}
+
+// The status line is still evidence.
+func TestHTTPStatusStillClassifiesWithoutTheBody(t *testing.T) {
+	for status, want := range map[int]Code{401: CodeAuthFailed, 403: CodeAuthFailed, 404: CodeInvalidArgument, 503: CodeUnreachable} {
+		err := fmt.Errorf("HTTP request failed with status %d: <html>whatever</html>", status)
+		if te := FromError(err, "cam", "Op"); te.Code != want {
+			t.Errorf("status %d: code = %s, want %s", status, te.Code, want)
+		}
+	}
+}

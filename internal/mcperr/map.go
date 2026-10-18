@@ -74,6 +74,21 @@ func cutBody(s string) string {
 	return strings.TrimRight(s[:loc[1]+i], " ") + " [response body omitted]"
 }
 
+// withoutBody returns s with the camera's reply body removed, for use when
+// classifying. The body is the camera's text, not evidence: a 500 page that
+// says "unauthorized" or "not found" must not become auth_failed or not_found.
+// Everything after the "HTTP request failed with status N:" prefix goes, plain
+// text included (cutBody only hides XML for display). A parsed SOAP fault is
+// the exception, because there onvif-go put the fault, not a raw body, after
+// the prefix (with or without a bracketed code), so it is kept.
+func withoutBody(s string) string {
+	loc := httpFailedRe.FindStringIndex(s)
+	if loc == nil || strings.Contains(s, "SOAP fault:") {
+		return s
+	}
+	return s[:loc[1]]
+}
+
 // httpStatus returns the HTTP status named in err's text, or 0.
 func httpStatus(s string) int {
 	if m := statusRe.FindStringSubmatch(s); m != nil {
@@ -125,7 +140,7 @@ func isTLSTyped(err error) bool {
 // The HTTP status is read before any text heuristic so that a body such as
 // "404 page not found" is never taken for a missing token.
 func classifyTransport(err error) (verdict, bool) {
-	text := err.Error()
+	text := withoutBody(err.Error())
 	l := strings.ToLower(text)
 
 	if isTLSTyped(err) {
@@ -351,7 +366,7 @@ func fromError(err error, camera, operation string) *ToolError {
 			te.Code, te.Hint = v.code, v.hint
 			break
 		}
-		if isNotFoundText(err.Error()) {
+		if isNotFoundText(withoutBody(err.Error())) {
 			te.Code = CodeNotFound
 			te.Hint = "list the available tokens first, then pass one of them"
 			break
