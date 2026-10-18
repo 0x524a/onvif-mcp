@@ -57,7 +57,7 @@ func TestPrepareStreamInjectsOnlyForTheConfiguredHost(t *testing.T) {
 }
 
 func TestPrepareStreamEncodesSpecialCharactersAndRoundTrips(t *testing.T) {
-	for _, pass := range []string{"p@ss", "a:b", "a/b", "a?b", "a#b", "a b", "100%", nastyPass, "ünï"} {
+	for _, pass := range []string{"zqxv-p@ss", "zqxv-a:b", "zqxv-a/b", "zqxv-a?b", "zqxv-a#b", "zqxv a b", "zqxv-100%", nastyPass, "zqxv-ünï"} {
 		e := streamEntry(config.Camera{Password: pass})
 		sp, err := e.PrepareStream("rtsp://192.0.2.10/s")
 		if err != nil {

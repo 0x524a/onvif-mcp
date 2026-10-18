@@ -366,7 +366,7 @@ func TestInspectFullPathAgainstAuthenticatedServer(t *testing.T) {
 		"basic":  {auth.VerifyMethodBasic},
 		"digest": {auth.VerifyMethodDigestMD5},
 	}
-	passwords := []string{"plain", "p@ss", "a:b", "a/b", "a?b", "a#b", "a b", "100%", "x%41y", canaryPass}
+	passwords := []string{"zqxv-plain", "zqxv-p@ss", "zqxv-a:b", "zqxv-a/b", "zqxv-a?b", "zqxv-a#b", "zqxv a b", "zqxv-100%", "zqxv-x%41y", canaryPass}
 	for name, m := range methods {
 		for _, pw := range passwords {
 			t.Run(name+"/"+pw, func(t *testing.T) {
@@ -601,9 +601,9 @@ func TestInspectRefusesUnusableSchemesAndPorts(t *testing.T) {
 }
 
 func TestInspectStripsCameraUserinfoFromSameHostURI(t *testing.T) {
-	srv := startRTSP(t, "127.0.0.1", canaryUser, "right-pass")
+	srv := startRTSP(t, "127.0.0.1", canaryUser, "zqxv-right-pass")
 	uri := "rtsp://attacker:their-pass@127.0.0.1:" + portOf(srv.addr) + "/s"
-	env := streamSession(t, uri, config.Camera{Password: "right-pass"}, probe.NewRTSP())
+	env := streamSession(t, uri, config.Camera{Password: "zqxv-right-pass"}, probe.NewRTSP())
 	res := inspect(t, env.cs, nil)
 	d := dataMap(t, res)
 	if d["authenticated"] != true {

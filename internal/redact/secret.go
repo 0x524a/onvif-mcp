@@ -90,6 +90,14 @@ const maxSecrets = 256
 // that appears in free-form prose. Calls are idempotent and safe for
 // concurrent use.
 //
+// The registry is process-global and has no reset: a registered secret stays
+// registered for the life of the process, and Scrub then removes it from every
+// string, including ordinary prose. A short or common password (for example
+// "abc" or "a b") therefore also redacts unrelated text that contains it, and
+// in a test binary it does so for every later test. Tests must register
+// distinctive values; a deployment that uses a very short password gets
+// correspondingly noisy redaction.
+//
 // It returns true when s is covered by Scrub afterwards (newly registered or
 // already registered). It returns false, registering nothing, when s is
 // shorter than 3 bytes or when 256 distinct secrets are already registered;
