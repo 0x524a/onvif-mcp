@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	onvif "github.com/0x524a/onvif-go"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -49,6 +50,13 @@ type Deps struct {
 	// checked by CheckSnapshotMaxBytes where the flag is read, not here, so
 	// tests can use a tiny cap.
 	SnapshotMaxBytes int
+
+	// Test seams, unexported so they cannot be set from outside the package.
+	// snapshotSlots and snapshotSlotWait override the concurrency bound of
+	// camera.snapshot; snapshotHook runs at the start of every call.
+	snapshotSlots    int
+	snapshotSlotWait time.Duration
+	snapshotHook     func()
 }
 
 // Scope returns a context cancelled when either ctx or d.Base is done.

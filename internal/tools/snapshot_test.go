@@ -154,7 +154,15 @@ func snapSession(t *testing.T, uri string, cam config.Camera, mod func(*Deps)) s
 	return snapSessionOn(t, fx, cam, mod)
 }
 
+// snapSessionOn allows Basic over plain http, because the test servers are
+// plain http; snapSessionExact keeps the camera config as given.
 func snapSessionOn(t *testing.T, fx *httptest.Server, cam config.Camera, mod func(*Deps)) snapEnv {
+	t.Helper()
+	cam.AllowBasicOverHTTP = true
+	return snapSessionExact(t, fx, cam, mod)
+}
+
+func snapSessionExact(t *testing.T, fx *httptest.Server, cam config.Camera, mod func(*Deps)) snapEnv {
 	t.Helper()
 	cam.ID = "fx"
 	cam.Endpoint = fx.URL + "/device_service"
@@ -343,7 +351,7 @@ func TestSnapshotToolDeclaration(t *testing.T) {
 	tool := lt.Tools[0]
 	a := tool.Annotations
 	if tool.Name != "camera.snapshot" || a == nil || !a.ReadOnlyHint || !a.IdempotentHint ||
-		a.DestructiveHint == nil || *a.DestructiveHint || a.OpenWorldHint == nil || *a.OpenWorldHint {
+		a.DestructiveHint == nil || *a.DestructiveHint || a.OpenWorldHint == nil || !*a.OpenWorldHint {
 		t.Errorf("annotations = %+v", a)
 	}
 	for _, want := range []string{"Use this after media.profiles", "1 MiB", "trust_advertised_hosts", "Does not record or stream video", "does not move the camera", "never appear"} {
@@ -542,7 +550,7 @@ func TestSnapshotNeverBuffersAnEndlessBody(t *testing.T) {
 	runtime.ReadMemStats(&before)
 	res := snap(t, env.cs, nil)
 	runtime.ReadMemStats(&after)
-	wantFault(t, res, "invalid_argument", fmt.Sprintf("more than %d bytes, over the %d byte limit", MinSnapshotMaxBytes, MinSnapshotMaxBytes))
+	wantFault(t, res, "invalid_argument", fmt.Sprintf("larger than the %d byte limit", MinSnapshotMaxBytes))
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):

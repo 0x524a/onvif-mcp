@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"image"
@@ -10,6 +11,7 @@ import (
 	_ "image/png"  // registers the PNG decoder image.DecodeConfig uses
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -115,6 +117,11 @@ func snapshotRefusalError(camera string, r *registry.SnapshotRefusal) *mcperr.To
 		return snapshotFault(camera, snapshotFetchOp, "camera advertised a snapshot address that onvif-mcp never contacts",
 			"unspecified, multicast, broadcast, link-local and numeric-spelled addresses are refused even when "+
 				"trust_advertised_hosts is set; nothing was requested")
+	case registry.RefusedSnapshotSchemeDowngrade:
+		return snapshotFault(camera, snapshotFetchOp, "camera is configured with an https endpoint but advertised an http snapshot address",
+			"onvif-mcp never offers the camera's credentials over plain http to a camera it reaches over https, "+
+				"so nothing was requested. The camera's snapshot setting should serve https, or the operator can "+
+				"configure an http endpoint for it if the network is trusted")
 	default:
 		return snapshotFault(camera, snapshotFetchOp, "camera advertised a snapshot address that is not a usable http or https URL",
 			"the scheme must be http or https and any port 1 to 65535; nothing was requested")
@@ -137,11 +144,11 @@ func snapshotFetchError(camera string, err error) *mcperr.ToolError {
 	switch se.Kind {
 	case registry.SnapshotTooLarge:
 		te.Code = mcperr.CodeInvalidArgument
-		size := "more than " + fmt.Sprint(se.Limit) + " bytes"
 		if se.Size >= 0 {
-			size = fmt.Sprintf("%d bytes", se.Size)
+			te.Message = fmt.Sprintf("the snapshot is %d bytes, over the %d byte limit", se.Size, se.Limit)
+		} else {
+			te.Message = fmt.Sprintf("the snapshot is larger than the %d byte limit", se.Limit)
 		}
-		te.Message = fmt.Sprintf("the snapshot is %s, over the %d byte limit", size, se.Limit)
 		te.Hint = "pick a lower-resolution profile from media.profiles (or lower the resolution or quality of this " +
 			"one on the camera), or ask the operator to raise -snapshot-max-bytes; nothing was returned"
 	case registry.SnapshotRedirected:
@@ -159,6 +166,24 @@ func snapshotFetchError(camera string, err error) *mcperr.ToolError {
 		te.Code = mcperr.CodeAuthFailed
 		te.Hint = "the snapshot address asked for an authentication method onvif-mcp does not support (it supports " +
 			"HTTP Basic and Digest with qop auth); the camera's web authentication setting may need changing"
+	case registry.SnapshotBasicOverHTTP:
+		te.Code = mcperr.CodeAuthFailed
+		te.Hint = "the snapshot address over plain http offers only HTTP Basic, which would send the password in " +
+			"cleartext, so it was not sent. The operator can set allow_basic_over_http for this camera in the " +
+			"config if the network is trusted, or the camera's web authentication can be switched to Digest or " +
+			"its snapshots served over https"
+	case registry.SnapshotMalformedReply:
+		te.Code = mcperr.CodeDeviceFault
+		te.Message = "the camera's snapshot server sent a reply that is not valid HTTP"
+		te.Hint = "the camera's snapshot server is misbehaving; pick another profile from media.profiles, or have " +
+			"the camera checked"
+	case registry.SnapshotUntrustedCertificate:
+		te.Code = mcperr.CodeDeviceFault
+		te.Message = "the snapshot address's certificate is not trusted"
+		te.Hint = "the snapshot address uses https with a certificate onvif-mcp does not trust (self-signed or " +
+			"from an unknown authority, or not valid for that host). That is for the operator to fix: the camera " +
+			"needs a certificate from a trusted CA, or snapshots served over http. onvif-mcp has no option to " +
+			"skip certificate verification, and your input is not the cause"
 	case registry.SnapshotForbidden:
 		te.Code = mcperr.CodeAuthFailed
 		te.Hint = "the camera refused access to snapshots; the configured user may lack permission to view them"
@@ -188,11 +213,11 @@ func statusHint(status int) string {
 	case http.StatusNotImplemented:
 		return noSnapshotHint
 	case http.StatusNotFound, http.StatusGone:
-		return "the camera no longer serves the snapshot address it advertised; call camera.snapshot again to get a fresh one, and check media.profiles"
+		return "the camera does not serve the snapshot address it advertised for this profile; check media.profiles and pick another profile"
 	case http.StatusRequestTimeout, http.StatusGatewayTimeout, http.StatusBadGateway, http.StatusServiceUnavailable:
 		return "the camera or a gateway in front of it is busy or unavailable; retry shortly"
 	case http.StatusTooManyRequests:
-		return "the camera is limiting snapshot requests; wait before trying again"
+		return "the camera is limiting snapshot requests; ask for snapshots less often, and do not repeat the call in a loop"
 	}
 	return "the snapshot address answered with an unexpected HTTP status; the camera may be misconfigured"
 }
@@ -209,11 +234,15 @@ func notAnImage(camera, hint string) *mcperr.ToolError {
 // still. SVG and HTML sniff as text and are refused, which also keeps active
 // content out of the agent's context.
 //
+// Trailing NUL padding (some cameras pad) is trimmed. A JPEG must reach its
+// end-of-image marker and a PNG its IEND chunk, and whatever follows is cut, so
+// a truncated frame is refused and a payload appended after a valid image never
+// reaches the agent. The returned slice is the image alone.
+//
 // The header is parsed with image.DecodeConfig, which reads dimensions without
 // decoding pixels, so a 1 MiB file cannot make this allocate a large bitmap.
-// The pixel data itself is not decoded; a truncated image with a valid header
-// is returned as is.
-func sniffImage(camera string, b []byte) (mime string, w, h int, te *mcperr.ToolError) {
+// The pixel data itself is not decoded.
+func sniffImage(camera string, b []byte) (data []byte, mime string, w, h int, te *mcperr.ToolError) {
 	const loginHint = "the camera answered with something that is not a JPEG or PNG image, for example a login or " +
 		"error page; check the configured credentials and the camera's snapshot setting. The reply is not shown"
 	switch http.DetectContentType(b) {
@@ -222,21 +251,116 @@ func sniffImage(camera string, b []byte) (mime string, w, h int, te *mcperr.Tool
 	case "image/png":
 		mime = "image/png"
 	default:
-		return "", 0, 0, notAnImage(camera, loginHint)
+		return nil, "", 0, 0, notAnImage(camera, loginHint)
 	}
+	b = bytes.TrimRight(b, "\x00")
+	end := -1
+	if mime == "image/jpeg" {
+		end = jpegEnd(b)
+	} else {
+		end = pngEnd(b)
+	}
+	if end < 0 {
+		return nil, "", 0, 0, notAnImage(camera, "the data begins like a JPEG or PNG but is not a complete image; the "+
+			"camera may be sending a truncated or corrupt frame; if it keeps doing so, pick another profile from media.profiles")
+	}
+	b = b[:end]
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(b))
 	if err != nil || (mime == "image/jpeg") != (format == "jpeg") || (mime == "image/png") != (format == "png") {
-		return "", 0, 0, notAnImage(camera, "the data begins like a JPEG or PNG but its header is not a valid image; "+
-			"the camera may be sending a truncated or corrupt frame, so retry once")
+		return nil, "", 0, 0, notAnImage(camera, "the data begins like a JPEG or PNG but is not a complete, valid image; "+
+			"the camera may be sending a truncated or corrupt frame; if it keeps doing so, pick another profile from media.profiles")
 	}
 	if cfg.Width < 1 || cfg.Height < 1 || cfg.Width > maxSnapshotSide || cfg.Height > maxSnapshotSide ||
 		int64(cfg.Width)*int64(cfg.Height) > maxSnapshotPixels {
-		return "", 0, 0, snapshotFault(camera, snapshotFetchOp,
+		return nil, "", 0, 0, snapshotFault(camera, snapshotFetchOp,
 			"the snapshot declares dimensions that onvif-mcp refuses to return",
 			fmt.Sprintf("an image larger than %d pixels on a side or %d megapixels is refused; the camera is "+
 				"misbehaving, or pick another profile from media.profiles", maxSnapshotSide, maxSnapshotPixels/1_000_000))
 	}
-	return mime, cfg.Width, cfg.Height, nil
+	return b, mime, cfg.Width, cfg.Height, nil
+}
+
+// jpegEnd returns the offset just past the end-of-image marker of the JPEG at
+// the start of b, or -1 if b does not reach one. It walks the marker segments
+// (an embedded thumbnail inside an APPn segment has its own EOI and is skipped
+// whole) and, after a start-of-scan, scans the entropy-coded data for the next
+// marker. If the structure cannot be walked, b is accepted only when it ends in
+// FF D9, which keeps odd but complete frames working.
+func jpegEnd(b []byte) int {
+	if end := jpegWalk(b); end > 0 {
+		return end
+	}
+	if n := len(b); n >= 4 && b[n-2] == 0xFF && b[n-1] == 0xD9 {
+		return n
+	}
+	return -1
+}
+
+func jpegWalk(b []byte) int {
+	i := 2 // past SOI
+	for i < len(b) {
+		if b[i] != 0xFF {
+			return -1
+		}
+		for i < len(b) && b[i] == 0xFF { // fill bytes
+			i++
+		}
+		if i >= len(b) {
+			return -1
+		}
+		m := b[i]
+		i++
+		switch {
+		case m == 0xD9:
+			return i
+		case m == 0x01 || (m >= 0xD0 && m <= 0xD8):
+			continue // no length
+		}
+		if i+2 > len(b) {
+			return -1
+		}
+		i += int(b[i])<<8 | int(b[i+1])
+		if m != 0xDA {
+			continue
+		}
+		// Entropy-coded data: FF 00 is a stuffed byte, FF D0..D7 a restart.
+		for i < len(b) {
+			if b[i] != 0xFF {
+				i++
+				continue
+			}
+			if i+1 >= len(b) {
+				return -1
+			}
+			if n := b[i+1]; n == 0x00 || (n >= 0xD0 && n <= 0xD7) {
+				i += 2
+				continue
+			}
+			break
+		}
+	}
+	return -1
+}
+
+// pngEnd returns the offset just past the IEND chunk of the PNG at the start
+// of b, or -1 if the chunks do not reach one.
+func pngEnd(b []byte) int {
+	i := 8 // past the signature
+	for i+12 <= len(b) {
+		n := int(binary.BigEndian.Uint32(b[i:]))
+		if n < 0 || n > len(b) {
+			return -1
+		}
+		next := i + 12 + n
+		if next > len(b) {
+			return -1
+		}
+		if string(b[i+4:i+8]) == "IEND" {
+			return next
+		}
+		i = next
+	}
+	return -1
 }
 
 func snapshotSummary(mime string, w, h, n int, profile string) string {
@@ -263,6 +387,7 @@ func RegisterSnapshot(srv *mcp.Server, d Deps) {
 	if limit <= 0 {
 		limit = DefaultSnapshotMaxBytes
 	}
+	slots := make(chan struct{}, snapshotSlotCount(d, limit))
 	GuardedTool(srv, d, safety.RiskRead, &mcp.Tool{
 		Name: "camera.snapshot",
 		Description: "Use this after media.profiles to see what a camera sees: it captures one still image from a " +
@@ -279,7 +404,7 @@ func RegisterSnapshot(srv *mcp.Server, d Deps) {
 			"device_fault. A camera without snapshot support gives not_supported. Does not record or stream " +
 			"video, does not move the camera, and does not change anything; use stream.inspect for codecs.",
 		InputSchema: snapshotSchema(),
-		Annotations: &mcp.ToolAnnotations{Title: "Capture snapshot"},
+		Annotations: &mcp.ToolAnnotations{Title: "Capture snapshot", OpenWorldHint: boolPtr(true)},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ProfileIn) (res *mcp.CallToolResult, out mcperr.Out[SnapshotData], err error) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -290,13 +415,67 @@ func RegisterSnapshot(srv *mcp.Server, d Deps) {
 				})
 			}
 		}()
-		return takeSnapshot(ctx, d, in, limit)
+		return takeSnapshot(ctx, d, in, limit, slots)
 	}, nil)
 }
 
-func takeSnapshot(ctx context.Context, d Deps, in ProfileIn, limit int) (*mcp.CallToolResult, mcperr.Out[SnapshotData], error) {
+// Concurrent snapshots. Each in-flight call holds the image several times over
+// (the fetched bytes, their base64 form and the marshalled reply), so an
+// agent that fires many calls at once could exhaust memory. At most this many
+// fetch at a time; a call that cannot get a slot within snapshotSlotWait
+// fails with a retryable timeout instead of queueing without bound.
+const (
+	defaultSnapshotSlots    = 4
+	bigSnapshotSlots        = 2 // when the cap is above bigSnapshotCap
+	bigSnapshotCap          = 2 << 20
+	defaultSnapshotSlotWait = 2 * time.Second
+)
+
+func snapshotSlotCount(d Deps, limit int) int {
+	switch {
+	case d.snapshotSlots > 0:
+		return d.snapshotSlots
+	case limit > bigSnapshotCap:
+		return bigSnapshotSlots
+	}
+	return defaultSnapshotSlots
+}
+
+// acquireSnapshotSlot takes a slot or returns the error to report.
+func acquireSnapshotSlot(ctx context.Context, slots chan struct{}, d Deps, camera string) (func(), *mcperr.ToolError) {
+	release := func() { <-slots }
+	select {
+	case slots <- struct{}{}:
+		return release, nil
+	default:
+	}
+	wait := d.snapshotSlotWait
+	if wait <= 0 {
+		wait = defaultSnapshotSlotWait
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case slots <- struct{}{}:
+		return release, nil
+	case <-ctx.Done():
+		return nil, mcperr.FromError(ctx.Err(), camera, snapshotFetchOp)
+	case <-timer.C:
+		return nil, &mcperr.ToolError{
+			Code: mcperr.CodeTimeout, Retryable: true, Camera: camera, Operation: snapshotFetchOp,
+			Message: "too many camera.snapshot calls are running at once",
+			Hint: "other snapshots are still being taken, and each one holds a full image in memory; wait a few " +
+				"seconds and call camera.snapshot again, and take snapshots one after another rather than in parallel",
+		}
+	}
+}
+
+func takeSnapshot(ctx context.Context, d Deps, in ProfileIn, limit int, slots chan struct{}) (*mcp.CallToolResult, mcperr.Out[SnapshotData], error) {
 	ctx, cancel := d.Scope(ctx)
 	defer cancel()
+	if d.snapshotHook != nil {
+		d.snapshotHook()
+	}
 	camera := redactCamera(in.Camera)
 
 	c, te := d.client(ctx, in.Camera, snapshotURIOp)
@@ -317,11 +496,17 @@ func takeSnapshot(ctx context.Context, d Deps, in ProfileIn, limit int) (*mcp.Ca
 			"the camera returned no snapshot address for this profile", noSnapshotHint))
 	}
 
+	release, te := acquireSnapshotSlot(ctx, slots, d, camera)
+	if te != nil {
+		return fail[SnapshotData](te)
+	}
+	defer release()
+
 	body, err := e.FetchSnapshot(ctx, u.URI, int64(limit), e.Timeout())
 	if err != nil {
 		return fail[SnapshotData](snapshotFetchError(in.Camera, err))
 	}
-	mime, w, h, te := sniffImage(camera, body.Data)
+	img, mime, w, h, te := sniffImage(camera, body.Data)
 	if te != nil {
 		return fail[SnapshotData](te)
 	}
@@ -331,10 +516,10 @@ func takeSnapshot(ctx context.Context, d Deps, in ProfileIn, limit int) (*mcp.Ca
 	// encodes them on the wire); they are not text, so neither the sanitiser
 	// nor Scrub touches them.
 	res := &mcp.CallToolResult{Content: []mcp.Content{
-		&mcp.TextContent{Text: snapshotSummary(mime, w, h, len(body.Data), profile)},
-		&mcp.ImageContent{Data: body.Data, MIMEType: mime},
+		&mcp.TextContent{Text: snapshotSummary(mime, w, h, len(img), profile)},
+		&mcp.ImageContent{Data: img, MIMEType: mime},
 	}}
 	return res, mcperr.OK(SnapshotData{
-		Bytes: len(body.Data), MIMEType: mime, Width: w, Height: h, Profile: profile,
+		Bytes: len(img), MIMEType: mime, Width: w, Height: h, Profile: profile,
 	}), nil
 }
