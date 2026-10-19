@@ -2,3 +2,6 @@
 # that should not appear in the public repository.
 CLAUDE.local.md
 ARCHITECTURE_PROMPT.md
+
+# release build output
+/dist/
