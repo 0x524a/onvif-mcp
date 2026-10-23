@@ -245,10 +245,20 @@ func TestTLSServesHTTP11OnlyAndRefusesOldVersions(t *testing.T) {
 	}
 	_ = conn.Close()
 
-	if c, err := tls.Dial("tcp", r.addr, &tls.Config{InsecureSkipVerify: true, MaxVersion: tls.VersionTLS11}); err == nil { //nolint:gosec // proving TLS 1.1 is refused
-		_ = c.Close()
-		t.Error("TLS 1.1 was accepted")
+	// MinVersion must be set explicitly: the client's default minimum is TLS 1.2,
+	// which would fail the dial before the server was involved.
+	for _, v := range []uint16{tls.VersionTLS10, tls.VersionTLS11} {
+		if c, err := tls.Dial("tcp", r.addr, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS10, MaxVersion: v}); err == nil { //nolint:gosec // proving old TLS is refused
+			_ = c.Close()
+			t.Errorf("TLS version %#x was accepted", v)
+		}
 	}
+	// Positive control: the same client config capped at 1.2 connects.
+	c12, err := tls.Dial("tcp", r.addr, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS10, MaxVersion: tls.VersionTLS12}) //nolint:gosec // self-signed test server
+	if err != nil {
+		t.Fatalf("TLS 1.2 dial failed: %v", err)
+	}
+	_ = c12.Close()
 
 	// And a request works end to end over TLS.
 	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}} //nolint:gosec // self-signed test server
@@ -370,6 +380,57 @@ func TestCallOutlivingTheDrainIsCancelledAndTheClientSeesAToolError(t *testing.T
 	}
 	if !strings.Contains(r.log.String(), "shutdown deadline passed") {
 		t.Errorf("the abort was not logged:\n%s", r.log.String())
+	}
+}
+
+// Drain is belt and braces next to http.Server.Shutdown (which already stops
+// keep-alive), so Serve calling it is not observable from outside; what is
+// pinned here is that a draining chain answers 503 with Connection: close.
+func TestDrainingServerAnswers503WithConnectionClose(t *testing.T) {
+	r := startServer(t, shortTimeouts())
+	r.s.Chain().Drain()
+	c, err := net.Dial("tcp", r.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	_, _ = c.Write([]byte(rawPost(tok(1), holdBody())))
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusServiceUnavailable || !resp.Close {
+		t.Errorf("status %d close=%v, want 503 with Connection: close", resp.StatusCode, resp.Close)
+	}
+}
+
+// A handler that ignores cancellation holds its connection past the deadline and
+// the grace; Serve must then close it instead of leaving it open.
+func TestConnectionStillOpenPastTheDeadlineIsClosed(t *testing.T) {
+	r := startServer(t, shortTimeouts())
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	mcp.AddTool(r.mcp, &mcp.Tool{Name: "stubborn", Description: "x"},
+		func(_ context.Context, _ *mcp.CallToolRequest, _ pinIn) (*mcp.CallToolResult, pinOut, error) {
+			r.inTool.Add(1)
+			defer r.inTool.Add(-1)
+			<-release
+			return nil, pinOut{OK: true}, nil
+		})
+	c, err := net.Dial("tcp", r.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"stubborn","arguments":{}}}`
+	_, _ = c.Write([]byte(rawPost(tok(1), body)))
+	waitTool(t, r, 1)
+	r.cancel()
+	out, closed := closedWithin(c, 3*time.Second)
+	if !closed || strings.Contains(out, "200 OK") {
+		t.Errorf("connection not closed past the deadline (closed=%v, out=%q)", closed, out)
 	}
 }
 

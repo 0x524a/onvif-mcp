@@ -6,5 +6,5 @@
 //   - mcp.NewStreamableHTTPHandler, mcp.StreamableHTTPOptions   mcp/streamable.go
 //   - auth.RequireBearerToken, auth.TokenInfo                   auth/auth.go
 //
-// The design is docs/superpowers/plans/2026-10-18-phase13b-streamable-http.md.
+// Limits are the constants in options.go; the README ("Serving over HTTP") tabulates them.
 package httpserver

@@ -1,7 +1,10 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -74,7 +77,7 @@ func NewChain(cfg ChainConfig) *Chain {
 	}
 	sdkStage := auth.RequireBearerToken(verifier, &auth.RequireBearerTokenOptions{AllowMissingExpiration: true})(cfg.Inner)
 
-	c.h = c.recoverAndLog(c.drain(c.path(c.host(c.origin(c.authenticate(c.limit(sdkStage)))))))
+	c.h = c.recoverAndLog(c.drain(c.path(c.host(c.origin(c.authenticate(c.limit(c.noBatch(sdkStage))))))))
 	return c
 }
 
@@ -296,6 +299,37 @@ func (c *Chain) limit(next http.Handler) http.Handler {
 			return
 		}
 		defer c.inflight.Add(-1)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// noBatch refuses JSON-RPC batch requests (a body whose first non-space byte is
+// '['). The SDK accepts batches in stateless JSON mode, and one 64 KiB batch of
+// cheap calls (tools/list, ping) would otherwise expand into a response tens of
+// megabytes large, outside every per-call cap. This server needs only single
+// requests. The body is read under the size cap, so it is already bounded; it is
+// handed on unchanged.
+func (c *Chain) noBatch(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.Body == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxBodyBytes))
+		if err != nil {
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				reject(w, http.StatusRequestEntityTooLarge, "request too large\n")
+			} else {
+				reject(w, http.StatusBadRequest, "bad request\n")
+			}
+			return
+		}
+		if t := bytes.TrimLeft(body, " \t\r\n"); len(t) > 0 && t[0] == '[' {
+			reject(w, http.StatusBadRequest, "batch requests are not supported\n")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		next.ServeHTTP(w, r)
 	})
 }

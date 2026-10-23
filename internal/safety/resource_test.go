@@ -281,6 +281,9 @@ func TestPolicyResourceWithWritesUnavailable(t *testing.T) {
 		if c.Writable {
 			t.Errorf("camera %s reported writable", c.ID)
 		}
+		if c.ControlAllowed {
+			t.Errorf("camera %s discloses its config-level control opt-in", c.ID)
+		}
 	}
 	for _, bad := range []string{"--enable-control", "ptz.goto_preset", "ptz.stop", "ptz.move_relative"} {
 		if strings.Contains(raw, bad) {

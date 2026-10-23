@@ -126,6 +126,9 @@ func (p *Policy) readOnlyTransportDocument(cams []CameraGrant) policyDoc {
 	grants := make([]CameraGrant, 0, len(cams))
 	for _, c := range cams {
 		c.Writable = false
+		// The config-level opt-in map is the operator's, and no tool on this
+		// transport uses it, so it is not disclosed to remote callers.
+		c.ControlAllowed = false
 		grants = append(grants, c)
 	}
 	return policyDoc{
@@ -137,8 +140,8 @@ func (p *Policy) readOnlyTransportDocument(cams []CameraGrant) policyDoc {
 		RateLimitPerCamera: "not applicable: no movement is possible on this transport",
 		HowToEnable:        p.WritesUnavailable,
 		DryRunDefault:      true,
-		Explanation: "every tool offered on this transport is read-only; control_allowed on a camera " +
-			"is the camera's own opt-in for transports that offer write tools and has no effect here",
+		Explanation: "every tool offered on this transport is read-only; control_allowed is always false here " +
+			"because per-camera write opt-ins do not apply to a transport that offers no write tool",
 		Why: whyText,
 	}
 }

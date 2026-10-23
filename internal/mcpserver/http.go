@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -223,6 +224,19 @@ func httpGuard(o HTTPGuardOptions) mcp.Middleware {
 	}
 }
 
+// maxLoggedToolName bounds the caller-supplied tool name written to the audit
+// log, so an authenticated caller cannot write a request-sized line per call.
+const maxLoggedToolName = 64
+
+// boundedName truncates s to maxLoggedToolName bytes (on a rune boundary) and
+// marks the cut. Registered tool names are far shorter, so they pass unchanged.
+func boundedName(s string) string {
+	if len(s) <= maxLoggedToolName {
+		return s
+	}
+	return strings.ToValidUTF8(s[:maxLoggedToolName], "") + "...(truncated)"
+}
+
 func guardCall(ctx context.Context, method string, req mcp.Request, next mcp.MethodHandler,
 	o HTTPGuardOptions, caps *callCaps, grantsFor func(string) []string, log *slog.Logger,
 ) (result mcp.Result, rerr error) {
@@ -234,7 +248,7 @@ func guardCall(ctx context.Context, method string, req mcp.Request, next mcp.Met
 	}
 	tool := sr.Params.Name
 	audit := func(outcome string) {
-		log.Info("tool call", "tool", tool, "caller", c.ID(), "transport", c.Transport(), "outcome", outcome)
+		log.Info("tool call", "tool", boundedName(tool), "caller", c.ID(), "transport", c.Transport(), "outcome", outcome)
 	}
 
 	if safety.IsOptInTool(tool) && !slices.Contains(grantsFor(c.ID()), tool) {

@@ -170,6 +170,28 @@ func TestHostileBrowserOriginAndPreflight(t *testing.T) {
 	}
 }
 
+// A JSON-RPC batch of cheap calls would expand one 64 KiB request into a
+// response tens of megabytes large, outside every per-call cap.
+func TestHostileBatchRequestsAreRefused(t *testing.T) {
+	r := startReal(t, realOpts{})
+	one := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	for name, body := range map[string]string{
+		"batch":           "[" + strings.Repeat(one+",", 1000) + one + "]",
+		"leading space":   " \r\n\t[" + one + "]",
+		"single in batch": "[" + one + "]",
+		"empty batch":     "[]",
+	} {
+		code, _, out := r.post(t, nil, body)
+		if code != 400 || len(out) > 200 {
+			t.Errorf("%s: status %d, %d bytes", name, code, len(out))
+		}
+	}
+	// A single request still works.
+	if code, _, _ := r.post(t, nil, one); code != 200 {
+		t.Errorf("single request: %d", code)
+	}
+}
+
 func TestHostileOversizedBodies(t *testing.T) {
 	r := startReal(t, realOpts{})
 	pad := strings.Repeat("a", 3*MaxBodyBytes)

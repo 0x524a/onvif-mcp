@@ -216,6 +216,8 @@ A client sends `Authorization: Bearer <token>` with each `POST /mcp` (and
 `Accept: application/json, text/event-stream`). Whether a given MCP client lets you set
 that header is up to the client; the Go SDK client does.
 
+Send one JSON-RPC message per `POST`; a batch array is refused with 400.
+
 ### Flags
 
 | Flag | Meaning |
@@ -267,6 +269,7 @@ These are constants, not flags (`internal/httpserver/options.go`, `internal/mcps
 | Connections per remote IP (IPv6 by /64) | 8, non-loopback peers only: a loopback bind, or a local proxy, is exempt, so put connection limits in the proxy |
 | Read header / whole request / idle / write | 5 s / 30 s / 60 s (authenticated connections only) / 180 s |
 | Header block / request body | 16 KiB / 64 KiB |
+| JSON-RPC batch arrays | refused (400); one request, one reply |
 | Requests in flight | 32 (then 503) |
 | Tool calls in flight | 32 in total, 8 per token (then a `blocked_by_policy` tool error with `retry_after_seconds`) |
 | One tool call | 120 s; a camera with a longer `timeout_seconds` is cut off earlier over HTTP |
@@ -274,13 +277,14 @@ These are constants, not flags (`internal/httpserver/options.go`, `internal/mcps
 
 Status codes: 401 for every authentication failure, with identical bytes; 403 for a `Host`
 off the allowlist or any `Origin` header; 404 for any path but `/mcp`; 405 for GET, DELETE
-and OPTIONS; 400, 413, 415 and 431 for malformed, oversized or mistyped requests; 503
+and OPTIONS; 400, 413, 415 and 431 for malformed (including batch), oversized or mistyped requests; 503
 while draining or when 32 requests are in flight. 429 is not used. Every response sent
 before a request authenticates closes the connection.
 
-Memory: a snapshot reply is buffered. Measured in-process with the SDK (Go 1.26.9),
-one 1 MiB image (1.3 MiB of JSON) raised peak heap use by about 13 MiB, and one 8 MiB
-image (10.7 MiB of JSON) by about 83 MiB: roughly eight to ten times the reply. That is
+Memory: a snapshot reply is buffered. The figures below come from a one-off local
+measurement in-process with the SDK (Go 1.26.9); no test in this repository reproduces
+them and they will vary with the SDK version and host. One 1 MiB image (1.3 MiB of JSON)
+raised peak heap use by about 13 MiB, and one 8 MiB image (10.7 MiB of JSON) by about 83 MiB: roughly eight to ten times the reply. That is
 why HTTP keeps the 1 MiB default snapshot cap, and an upper estimate with 32 snapshots
 at once is around half a gigabyte. The estimate is arithmetic from the single-request
 figures, not a measurement under load. On a small host, grant `camera.snapshot` to few
@@ -613,11 +617,12 @@ onvif-mcp deliberately exposes a small surface. It does **not**:
 - Speak anything but stdio and streamable HTTP. Over HTTP it does **not** offer motion
   or any state-changing tool (those exist on stdio only), implement OAuth or mTLS (static
   bearer tokens only, so a client that can only do OAuth cannot connect), or serve browser
-  clients (any `Origin` header is refused and no CORS header is ever set). It keeps no
+  clients (any `Origin` header is refused and no CORS header is ever set), or accept
+  JSON-RPC batches (a body starting with `[` is a 400). It keeps no
   sessions and supports no resumption, never trusts `X-Forwarded-*`, and does not reload
   tokens or certificates without a restart. It does not isolate callers from one another:
   any valid token can read the metadata and endpoints of every configured camera and the
-  policy resource, `control_allowed` is advisory and unusable over HTTP, and the only
+  policy resource, `control_allowed` is reported as false over HTTP, and the only
   per-token distinction is the grant of `camera.snapshot`, `camera.discover` and
   `stream.inspect`. It does not apply the per-IP connection cap to loopback peers (put
   limits in the proxy) and does not defend against distributed connection floods (put a

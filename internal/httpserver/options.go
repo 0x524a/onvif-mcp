@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// Operational limits (plan D8). They are constants, not flags; the README table
+// Operational limits. They are constants, not flags; the README table
 // is written from these names.
 const (
 	MaxConns          = 128

@@ -254,7 +254,7 @@ func TestPinSDKHostCheckScope(t *testing.T) {
 	port := l.Addr().(*net.TCPAddr).Port
 	resp, _ = postJSON(t, fmt.Sprintf("http://%s:%d", nonLoop, port), map[string]string{"Host": "evil.example"}, callBody("block", 1))
 	if resp.StatusCode == http.StatusForbidden {
-		t.Errorf("wildcard bind via non-loopback address: SDK Host check fired; pin outdated, revisit D5")
+		t.Errorf("wildcard bind via non-loopback address: SDK Host check fired; pin outdated, revisit the Host allowlist")
 	}
 }
 
@@ -332,7 +332,7 @@ func TestPinHandlerOutlivesRequest(t *testing.T) {
 			stillRunning := st.started.Load() == 1 && st.finished.Load() == 0
 			t.Logf("protocol %s: handler still running 300 ms after abort: %v", tc.version, stillRunning)
 			if tc.version == "2025-06-18" && !stillRunning {
-				t.Fatal("SDK now cancels the handler on client abort for 2025-06-18: revisit D8 (caps may be released earlier), then update this pin")
+				t.Fatal("SDK now cancels the handler on client abort for 2025-06-18: revisit the tool-call caps (caps may be released earlier), then update this pin")
 			}
 			// Whatever the version does, the tool-level cap design stays: the slot is
 			// owned by the handler and freed when it returns.
@@ -367,7 +367,7 @@ func TestPinSubscriptionsListenBlocksWithoutMiddleware(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 	if time.Since(start) < 1400*time.Millisecond {
-		t.Fatalf("subscriptions/listen returned after %v (err %v); the SDK no longer pins the connection: revisit D8", time.Since(start), err)
+		t.Fatalf("subscriptions/listen returned after %v (err %v); the SDK no longer pins the connection: revisit the subscriptions/listen refusal", time.Since(start), err)
 	}
 }
 

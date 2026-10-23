@@ -9,6 +9,12 @@ matching the pushed tag as the GitHub Release notes, so every tag needs a non-em
 
 ### Added
 
+- HTTP hardening from review: JSON-RPC batch arrays are refused with 400 (one 64 KiB batch
+  of `tools/list` calls could be expanded into a roughly 40 MB reply); the tool name in
+  the HTTP audit line is truncated to 64 bytes; the policy resource reports
+  `control_allowed` as false over HTTP; the TLS minimum-version test now genuinely
+  exercises the server, and shutdown has tests for 503 + `Connection: close` while draining
+  and for closing connections still open past the deadline.
 - Streamable HTTP transport, read-only: `-transport http` with `-listen` (default
   `127.0.0.1:8808`), `-http-tokens`, `-http-allow-remote`, `-http-allowed-hosts`,
   `-tls-cert` and `-tls-key`. Stateless, JSON responses, HTTP/1.1 only. Authentication is

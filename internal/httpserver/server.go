@@ -36,7 +36,7 @@ type Config struct {
 	tm *timeouts // tests only
 }
 
-// timeouts are the D8 values; tests shorten them.
+// timeouts are the production values from options.go; tests shorten them.
 type timeouts struct {
 	readHeader, read, idle, write, shutdown, grace time.Duration
 }
@@ -130,6 +130,11 @@ func (s *Server) Chain() *Chain { return s.chain }
 //     closes idle connections and waits for in-flight requests, up to the deadline
 //  3. if the deadline passed: cancel the tools' base context, wait a short grace
 //     so cancelled handlers can write their error reply, then Close
+//
+// The plan's "close the mcp.Server" step is deliberately not done: the server is
+// stateless (no session table, no listeners), so there is nothing to release.
+// Chain.Drain is redundant with Shutdown's own keep-alive stop; it is kept as a
+// second guard so a request that slips onto an open connection still gets 503.
 //
 // It returns nil after a clean stop and an error only if Shutdown failed for a
 // reason other than the deadline, or the listener failed before ctx was done.
