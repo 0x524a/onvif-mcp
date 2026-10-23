@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/0x524a/onvif-mcp/internal/config"
+	"github.com/0x524a/onvif-mcp/internal/httpserver"
 	"github.com/0x524a/onvif-mcp/internal/mcpserver"
 	"github.com/0x524a/onvif-mcp/internal/registry"
 	"github.com/0x524a/onvif-mcp/internal/safety"
@@ -81,20 +82,29 @@ func notifyWithGrace(parent context.Context, grace time.Duration, sigs ...os.Sig
 // run is main without the process-level side effects. Exit codes: 0 clean,
 // 1 runtime or configuration failure, 2 usage error.
 //
-// stdout is the JSON-RPC channel once the server starts, so nothing but the
-// SDK writes to it after that point. The only other thing ever written to
-// stdout is the -version string, and only because the server is not started in
-// that case. Every log line goes to stderr.
+// stdout is the JSON-RPC channel once the stdio server starts, so nothing but the
+// SDK writes to it after that point. The only other things ever written to stdout
+// are the -version string and the -new-token output, and only because the server
+// is not started in those cases. Every log line goes to stderr, and the HTTP
+// transport never writes to stdout at all.
 func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("onvif-mcp", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "path to the camera config file (required)")
 	enableControl := fs.Bool("enable-control", false,
-		"permit state-changing tools; each camera must also opt in via its config entry")
+		"permit state-changing tools (stdio only); each camera must also opt in via its config entry")
 	snapshotMax := fs.Int("snapshot-max-bytes", tools.DefaultSnapshotMaxBytes,
 		fmt.Sprintf("largest image camera.snapshot returns, in raw bytes (%d to %d); a larger snapshot is refused, not cut",
 			tools.MinSnapshotMaxBytes, tools.MaxSnapshotMaxBytes))
 	showVersion := fs.Bool("version", false, "print the version to stdout and exit")
+	transport := fs.String("transport", "stdio", `"stdio" (default) or "http" (read-only streamable HTTP)`)
+	listen := fs.String("listen", httpserver.DefaultListen, "http only: address to listen on (an IP literal or localhost)")
+	tokensPath := fs.String("http-tokens", "", "http only: path to the bearer-token file (mode 600); required with -transport http")
+	allowRemote := fs.Bool("http-allow-remote", false, "http only: permit a non-loopback -listen (needs TLS and -http-allowed-hosts)")
+	allowedHosts := fs.String("http-allowed-hosts", "", "http only: comma-separated Host names accepted besides the loopback defaults")
+	tlsCert := fs.String("tls-cert", "", "http only: TLS certificate file (PEM); with -tls-key serves HTTPS in-process")
+	tlsKey := fs.String("tls-key", "", "http only: TLS private key file (PEM, mode 600)")
+	newToken := fs.String("new-token", "", "print a fresh bearer token and its token-file entry for ID, then exit")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -107,6 +117,29 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return 0
 	}
 
+	explicit := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	rs, err := httpserver.Validate(httpserver.Flags{
+		Transport: *transport, Listen: *listen, Tokens: *tokensPath, AllowRemote: *allowRemote,
+		AllowedHosts: *allowedHosts, TLSCert: *tlsCert, TLSKey: *tlsKey, NewToken: *newToken,
+		EnableControl: *enableControl, SnapshotMaxBytes: *snapshotMax,
+		DefaultSnapshotMaxBytes: tools.DefaultSnapshotMaxBytes, Explicit: explicit,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "onvif-mcp: "+err.Error())
+		return 2
+	}
+	if rs.NewToken {
+		token, entry, err := httpserver.NewToken(*newToken)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "onvif-mcp: "+err.Error())
+			return 1
+		}
+		_, _ = fmt.Fprintln(stdout, token)
+		_, _ = fmt.Fprintln(stdout, entry)
+		return 0
+	}
+
 	if err := tools.CheckSnapshotMaxBytes(*snapshotMax); err != nil {
 		_, _ = fmt.Fprintln(stderr, "onvif-mcp: -"+err.Error())
 		return 2
@@ -116,7 +149,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 
 	if *cfgPath == "" {
 		log.Error("missing required flag: -config")
-		_, _ = fmt.Fprintln(stderr, "usage: onvif-mcp -config <path> [-enable-control] [-snapshot-max-bytes N]   (the config file must be mode 600; see the README)")
+		_, _ = fmt.Fprintln(stderr, "usage: onvif-mcp -config <path> [-enable-control] [-snapshot-max-bytes N] [-transport http -http-tokens <path> ...]   (the config file must be mode 600; see the README)")
 		return 2
 	}
 	cfg, err := config.Load(*cfgPath)
@@ -124,8 +157,15 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		log.Error("load config", "error", err)
 		return 1
 	}
+	if rs.HTTP {
+		return runHTTP(ctx, rs, httpFiles{tokens: *tokensPath, cert: *tlsCert, key: *tlsKey}, cfg, *snapshotMax, log)
+	}
 	cfg.ControlEnabled = *enableControl
+	return runStdio(ctx, cfg, *snapshotMax, stdin, stdout, log)
+}
 
+// runStdio serves the full tool surface to the operator over stdin/stdout.
+func runStdio(ctx context.Context, cfg *config.Config, snapshotMax int, stdin io.Reader, stdout io.Writer, log *slog.Logger) int {
 	reg := registry.New(cfg)
 	for _, s := range reg.List() {
 		log.Info("camera", "id", s.ID, "control_allowed", s.Control)
@@ -137,16 +177,73 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		Log:            log,
 	})
 	log.Info("starting", "control_enabled", cfg.ControlEnabled, "write_tools_registered", policy.WriteRegistered(),
-		"snapshot_max_bytes", *snapshotMax, "transport", "stdio")
+		"snapshot_max_bytes", snapshotMax, "transport", "stdio")
 
 	// ctx is also the base context of every tool call, so a signal aborts
 	// in-flight camera I/O instead of waiting for it to time out.
-	srv := mcpserver.New(reg, log, policy, mcpserver.WithBaseContext(ctx), mcpserver.WithSnapshotMaxBytes(*snapshotMax),
+	srv := mcpserver.New(reg, log, policy, mcpserver.WithBaseContext(ctx), mcpserver.WithSnapshotMaxBytes(snapshotMax),
 		// Stdio is the one transport whose caller is the operator, with control.
 		mcpserver.WithCallerSource(mcpserver.StdioOperator()))
 	tr := stdio.NewTransport(stdin, stdout, stdio.MaxLineBytes, log)
-	err = srv.Run(ctx, tr)
+	err := srv.Run(ctx, tr)
 	if err != nil && !errors.Is(err, context.Canceled) && !isStdinClosed(err) {
+		log.Error("server stopped", "error", err)
+		return 1
+	}
+	log.Info("server stopped")
+	return 0
+}
+
+type httpFiles struct{ tokens, cert, key string }
+
+// runHTTP serves the read-only tool surface over streamable HTTP. It registers no
+// write tool (the policy has control off and mcpserver.New panics otherwise), maps
+// every request to a RemoteCaller that cannot carry control, and never touches
+// stdout.
+func runHTTP(ctx context.Context, rs httpserver.Resolved, files httpFiles, cfg *config.Config, snapshotMax int, log *slog.Logger) int {
+	tokens, err := httpserver.LoadTokens(files.tokens)
+	if err != nil {
+		log.Error("load token file", "error", err)
+		return 1
+	}
+	cfg.ControlEnabled = false
+	reg := registry.New(cfg)
+	policy := safety.NewPolicy(safety.PolicyOptions{ControlEnabled: false, Cameras: reg, Log: log})
+
+	// Tool calls get their own base context so shutdown can let in-flight calls
+	// finish before cancelling them (httpserver.Server.Serve).
+	toolCtx, cancelTools := context.WithCancel(context.Background())
+	defer cancelTools()
+	srv := mcpserver.New(reg, log, policy,
+		mcpserver.WithBaseContext(toolCtx), mcpserver.WithSnapshotMaxBytes(snapshotMax),
+		mcpserver.WithCallerSource(mcpserver.HTTPCallers()),
+		mcpserver.WithHTTPGuard(mcpserver.HTTPGuardOptions{Grants: tokens, Log: log}))
+
+	hs, err := httpserver.New(httpserver.Config{
+		Resolved: rs, Tokens: tokens, MCP: srv, Log: log, TLSCert: files.cert, TLSKey: files.key,
+		CancelTools: cancelTools,
+		// After the first signal restore default handling, so a second one
+		// terminates a stuck shutdown. (notifyWithGrace's hold exists for the stdio
+		// motion tools, which HTTP does not have.)
+		OnFirstSignal: func() { signal.Reset(os.Interrupt, syscall.SIGTERM) },
+	})
+	if err != nil {
+		log.Error("http server", "error", err)
+		return 1
+	}
+	l, err := httpserver.Listen(rs, nil)
+	if err != nil {
+		log.Error("http listen", "error", err)
+		return 1
+	}
+	grants := make([]string, 0, tokens.Len())
+	for _, id := range tokens.IDs() {
+		grants = append(grants, id+"="+strings.Join(tokens.Grants(id), "+"))
+	}
+	log.Info("starting", "transport", "http", "listen", l.Addr().String(), "tls", rs.TLS,
+		"tokens", strings.Join(tokens.IDs(), ","), "grants", strings.Join(grants, ";"),
+		"allowed_hosts", rs.HostCount(), "write_tools_registered", false, "snapshot_max_bytes", snapshotMax)
+	if err := hs.Serve(ctx, l); err != nil {
 		log.Error("server stopped", "error", err)
 		return 1
 	}
