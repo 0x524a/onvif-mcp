@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 	"weak"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -44,6 +45,20 @@ import (
 //     internal tool error rather than propagated: a misbehaving write tool
 //     must not take the whole server, and every other camera, down with it.
 //
+// RiskHalt (see safety.RiskHalt; ptz.stop):
+//   - In must implement safety.HaltInput and must NOT implement
+//     safety.WriteInput: a halt has no dry run, so a dry_run field must not exist.
+//   - The annotations are replaced with safety.HaltAnnotations.
+//   - It is registered under the same gate as a write tool (control on) and is
+//     named by the policy resource whether or not it is registered.
+//   - The handler (haltHandler) runs Policy.EvaluateHalt, which applies only the
+//     camera and grant checks: no dry run, no rate limit, no audit-log
+//     requirement. It runs on a context detached from the request and from
+//     Deps.Base, so a cancel or a shutdown cannot abort a stop that has been
+//     dispatched. The audit is attempted and its failure never blocks the stop.
+//
+// NonIdempotent is accepted for RiskWrite only.
+//
 // Misuse panics at registration instead of returning an error. It is a
 // programming error in a fixed set of calls made while the server starts, so
 // it fails on every run, including the test run, and cannot be ignored the way
@@ -51,9 +66,17 @@ import (
 func GuardedTool[In, Data any](
 	srv *mcp.Server, d Deps, risk safety.RiskClass, t *mcp.Tool,
 	run, dryRun mcp.ToolHandlerFor[In, mcperr.Out[Data]],
+	opts ...GuardedOption,
 ) {
 	if t == nil || run == nil {
 		panic("tools.GuardedTool: tool and handler are required")
+	}
+	var o guardedOpts
+	for _, f := range opts {
+		f(&o)
+	}
+	if o.nonIdempotent && risk != safety.RiskWrite {
+		panic("tools.GuardedTool: " + t.Name + ": NonIdempotent applies to RiskWrite tools only")
 	}
 	tc := *t
 	title := ""
@@ -88,6 +111,9 @@ func GuardedTool[In, Data any](
 			panic("tools.GuardedTool: " + t.Name + ": a write tool requires a separate dry-run function")
 		}
 		tc.Annotations = safety.WriteAnnotations(title)
+		if o.nonIdempotent {
+			tc.Annotations = safety.WriteAnnotationsNonIdempotent(title)
+		}
 		claimName(srv, t.Name)
 		d.Policy.NoteGated(t.Name)
 		if !d.Policy.WriteRegistered() {
@@ -95,10 +121,39 @@ func GuardedTool[In, Data any](
 		}
 		add(srv, &tc, guardedHandler(d, t.Name, run, dryRun))
 
+	case safety.RiskHalt:
+		var zero In
+		if _, ok := any(zero).(safety.WriteInput); ok {
+			panic("tools.GuardedTool: " + t.Name + ": a halt tool has no dry run, so its input must not implement safety.WriteInput (do not embed safety.WriteBase)")
+		}
+		if _, ok := any(zero).(safety.HaltInput); !ok {
+			panic("tools.GuardedTool: " + t.Name + ": a halt tool's input must implement safety.HaltInput")
+		}
+		if dryRun != nil {
+			panic("tools.GuardedTool: " + t.Name + ": a halt tool has no dry-run function")
+		}
+		tc.Annotations = safety.HaltAnnotations(title)
+		claimName(srv, t.Name)
+		d.Policy.NoteHalt(t.Name)
+		if !d.Policy.WriteRegistered() {
+			return
+		}
+		add(srv, &tc, haltHandler(d, t.Name, run))
+
 	default:
 		panic("tools.GuardedTool: " + t.Name + ": unknown risk class")
 	}
 }
+
+// GuardedOption adjusts how GuardedTool registers a tool.
+type GuardedOption func(*guardedOpts)
+
+type guardedOpts struct{ nonIdempotent bool }
+
+// NonIdempotent marks a RiskWrite tool whose repeated calls compound (a
+// relative move): idempotentHint is false instead of the WriteAnnotations
+// default. It is the single permitted deviation from WriteAnnotations.
+func NonIdempotent() GuardedOption { return func(o *guardedOpts) { o.nonIdempotent = true } }
 
 // maxEchoedCamera bounds the camera id echoed back in an error.
 const maxEchoedCamera = 256
@@ -262,6 +317,79 @@ func guardedHandler[In, Data any](
 			}
 			res, out, err = fail[Data](te)
 		}
+		return res, out, err
+	}
+}
+
+// haltBudget is the generic ceiling on one halt call. The tool applies its own,
+// tighter deadlines (the camera's timeout); this only guarantees that a detached
+// context can never run unbounded.
+const haltBudget = 30 * time.Second
+
+// haltHandler wraps run in the RiskHalt guard. See GuardedTool.
+func haltHandler[In, Data any](
+	d Deps, tool string, run mcp.ToolHandlerFor[In, mcperr.Out[Data]],
+) mcp.ToolHandlerFor[In, mcperr.Out[Data]] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (
+		res *mcp.CallToolResult, out mcperr.Out[Data], err error,
+	) {
+		safety.NoteReached(ctx)
+		hi, ok := any(in).(safety.HaltInput)
+		if !ok {
+			return fail[Data](&mcperr.ToolError{
+				Code: mcperr.CodeInternal, Operation: tool,
+				Message: "the tool input carries no camera id, so the call was refused",
+			})
+		}
+		camera := hi.CameraID()
+		shown := redact.ScrubBounded(camera, maxEchoedCamera, "...")
+
+		dec := d.Policy.EvaluateHalt(camera, tool)
+		if dec.Blocked != nil {
+			return fail[Data](dec.Blocked)
+		}
+
+		// Detach from the request and from shutdown before anything else: once a
+		// stop is dispatched, a client cancel or a SIGTERM must not abort it.
+		ctx = context.WithoutCancel(ctx)
+		ctx, cancel := context.WithTimeout(ctx, haltBudget)
+		defer cancel()
+		ctx, target := safety.WithTargetSlot(ctx)
+
+		executed, outcome := true, "panic"
+		defer func() {
+			if r := recover(); r != nil {
+				outcome = "panic"
+				res, out, err = fail[Data](&mcperr.ToolError{
+					Code: mcperr.CodeInternal, Camera: shown, Operation: tool,
+					Message: "the tool failed unexpectedly",
+					Hint:    "call the stop tool again; if it keeps failing, report this to the operator",
+				})
+			}
+			// Attempted, never required: a missing logger cannot block a stop.
+			d.Policy.Audit(tool, camera, false, executed, outcome, safety.WithTarget(target.Get()))
+		}()
+
+		res, out, err = run(ctx, req, in)
+		if out.Error != nil && out.Error.NotSent {
+			executed = false
+		}
+		switch {
+		case err != nil:
+			outcome = "error"
+		case out.Error != nil:
+			outcome = string(out.Error.Code)
+		default:
+			outcome = "ok"
+		}
+		if err != nil {
+			return res, out, err
+		}
+		if finishOut(&out) {
+			outcome = string(mcperr.CodeDeviceFault)
+			res, out, err = fail[Data](nonFiniteError())
+		}
+		finishText(res)
 		return res, out, err
 	}
 }

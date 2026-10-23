@@ -55,6 +55,7 @@ type Policy struct {
 	// resource reports it, so the list cannot drift from what exists.
 	gatedMu sync.Mutex
 	gated   map[string]struct{}
+	halts   map[string]struct{}
 }
 
 // NoteGated records that a write tool exists and is gated by this policy. The
@@ -71,6 +72,37 @@ func (p *Policy) NoteGated(tool string) {
 		p.gated = make(map[string]struct{})
 	}
 	p.gated[tool] = struct{}{}
+}
+
+// NoteHalt records that a halt tool (RiskHalt) exists and is gated by this
+// policy. It also counts as gated, so the policy resource and the audit
+// middleware treat it like any gated tool. Nil-safe.
+func (p *Policy) NoteHalt(tool string) {
+	if p == nil {
+		return
+	}
+	p.NoteGated(tool)
+	p.gatedMu.Lock()
+	defer p.gatedMu.Unlock()
+	if p.halts == nil {
+		p.halts = make(map[string]struct{})
+	}
+	p.halts[tool] = struct{}{}
+}
+
+// HaltTools returns the noted halt tools, sorted. It never returns nil.
+func (p *Policy) HaltTools() []string {
+	out := []string{}
+	if p == nil {
+		return out
+	}
+	p.gatedMu.Lock()
+	defer p.gatedMu.Unlock()
+	for t := range p.halts {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // GatedTools returns the noted write tools, sorted. It never returns nil.
@@ -212,6 +244,50 @@ func (p *Policy) Evaluate(camera, tool string, dryRun bool) Decision {
 			"wait retry_after_seconds, then repeat the call"), ReasonRateLimited)
 	}
 	return Decision{Refund: func() { p.Limiter.RefundGrant(key, grant) }}
+}
+
+// EvaluateHalt is Evaluate for a RiskHalt tool. It applies only the gates that
+// still make sense for a stop: the camera is configured, control is enabled and
+// the camera is granted (the server can only have moved a granted camera). It
+// never consults the limiter, never requires the audit log and has no dry run,
+// so no budget, missing logger or full key table can stand between an agent and
+// a stop. Refusals are audited, like Evaluate's. A nil Policy refuses.
+func (p *Policy) EvaluateHalt(camera, tool string) Decision {
+	if p == nil {
+		return Decision{Blocked: blocked(clean(camera, maxErrCamera), tool, "write policy is not configured", nil)}
+	}
+	refuse := func(te *mcperr.ToolError, reason string) Decision {
+		p.auditBlocked(tool, camera, false, reason)
+		return Decision{Blocked: te}
+	}
+	var entry *registry.Entry
+	if p.Cameras != nil {
+		if e, err := p.Cameras.Get(camera); err == nil && e != nil {
+			entry = e
+		}
+	}
+	if entry == nil {
+		return refuse(&mcperr.ToolError{
+			Code:      mcperr.CodeNotFound,
+			Camera:    clean(camera, maxErrCamera),
+			Operation: tool,
+			Message:   "no camera with that id is configured",
+			Hint:      "call camera.list to see the configured camera ids",
+		}, ReasonUnknownCamera)
+	}
+	if !p.ControlEnabled {
+		return refuse(blocked(camera, tool,
+			"control is disabled for this server", nil,
+			"an operator must restart the server with --enable-control; an agent cannot change this"),
+			ReasonControlDisabled)
+	}
+	if !entry.ControlAllowed() {
+		return refuse(blocked(camera, tool,
+			"this camera has not opted in to control", nil,
+			"an operator must set \"control\": true on this camera's config entry; do not retry"),
+			ReasonCameraNotGranted)
+	}
+	return Decision{}
 }
 
 // misconfiguredHint is for the fail-closed refusals that only a broken server

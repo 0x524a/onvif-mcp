@@ -28,6 +28,7 @@ type policyDoc struct {
 	Mode               string        `json:"mode"`
 	ControlEnabled     bool          `json:"control_enabled"`
 	GatedWriteTools    []string      `json:"gated_write_tools"`
+	HaltTools          []string      `json:"halt_tools"`
 	Cameras            []CameraGrant `json:"cameras"`
 	RateLimitPerCamera string        `json:"rate_limit_per_camera"`
 	HowToEnable        string        `json:"how_to_enable"`
@@ -65,6 +66,7 @@ func (p *Policy) document(cams []CameraGrant) policyDoc {
 		grants = append(grants, c)
 	}
 	gated := p.GatedTools()
+	halts := p.HaltTools()
 
 	howTo := "an operator must restart the server with --enable-control " +
 		"AND set \"control\": true on the camera's config entry"
@@ -96,10 +98,16 @@ func (p *Policy) document(cams []CameraGrant) policyDoc {
 		explanation = "this build registers no write tool, so --enable-control currently changes nothing; " +
 			"every tool is read-only. " + explanation
 	}
+	if len(halts) > 0 {
+		explanation += ". " + strings.Join(halts, ", ") + " stops motion and is listed in gated_write_tools too, " +
+			"but has no dry run and is not rate limited: it is available whenever control is enabled and the camera opted in, " +
+			"so a stop is never held back by the movement rate limit"
+	}
 	return policyDoc{
 		Mode:               mode,
 		ControlEnabled:     enabled,
 		GatedWriteTools:    gated,
+		HaltTools:          halts,
 		Cameras:            grants,
 		RateLimitPerCamera: p.rateLimitText(),
 		HowToEnable:        howTo,

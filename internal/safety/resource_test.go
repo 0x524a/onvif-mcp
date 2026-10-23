@@ -236,3 +236,24 @@ func TestPolicyResourceWhenEnabledNamesWhatIsStillMissing(t *testing.T) {
 		t.Errorf("every camera is writable, so nothing is missing: %q", all.HowToEnable)
 	}
 }
+
+func TestPolicyResourceNamesHaltToolsAndSaysTheyHaveNoDryRunOrRateLimit(t *testing.T) {
+	p, _, _ := newPolicy(true)
+	p.NoteGated("ptz.goto_preset")
+	p.NoteHalt("ptz.stop")
+	body, raw := readPolicy(t, p)
+	if len(body.GatedWriteTools) != 2 || body.GatedWriteTools[1] != "ptz.stop" {
+		t.Errorf("gated = %v", body.GatedWriteTools)
+	}
+	for _, want := range []string{`"halt_tools"`, "ptz.stop", "no dry run", "not rate limited"} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("policy lacks %q: %s", want, raw)
+		}
+	}
+	// Without a halt tool the sentence is absent.
+	q, _, _ := newPolicy(true)
+	q.NoteGated("ptz.goto_preset")
+	if _, raw := readPolicy(t, q); strings.Contains(raw, "not rate limited") {
+		t.Errorf("no halt tool, yet the policy talks about one: %s", raw)
+	}
+}

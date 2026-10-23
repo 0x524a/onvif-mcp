@@ -2,6 +2,7 @@ package safety
 
 import (
 	"context"
+	"math"
 	"sync"
 	"sync/atomic"
 
@@ -12,6 +13,7 @@ const (
 	maxAuditCamera  = 64
 	maxAuditOutcome = 120
 	maxAuditTarget  = 64
+	maxAuditMode    = 32
 	// maxErrCamera bounds the camera id echoed back in a refusal.
 	maxErrCamera = 256
 )
@@ -19,7 +21,24 @@ const (
 // AuditOption adds optional detail to an audit record.
 type AuditOption func(*auditExtra)
 
-type auditExtra struct{ target string }
+type auditExtra struct {
+	target string
+	motion *MotionAudit
+}
+
+// MotionAudit is the typed description of a motion command for the audit trail.
+// Only these fields can reach the log through WithMotion: numbers the server
+// validated and a short mode name, never an agent-supplied string. A nil axis
+// was not sent and is not logged as zero.
+type MotionAudit struct {
+	Mode            string
+	Pan, Tilt, Zoom *float64
+}
+
+// WithMotion records the validated motion of the call.
+func WithMotion(m MotionAudit) AuditOption {
+	return func(e *auditExtra) { e.motion = &m }
+}
 
 // WithTarget records the resolved target of the call (for example the preset
 // or profile token a tool resolved), scrubbed and bounded. The tool decides
@@ -69,6 +88,17 @@ func (p *Policy) Audit(tool, camera string, dryRun, executed bool, outcome strin
 	}
 	if x.target != "" {
 		attrs = append(attrs, "target", clean(x.target, maxAuditTarget))
+	}
+	if m := x.motion; m != nil {
+		attrs = append(attrs, "motion_mode", clean(m.Mode, maxAuditMode))
+		for _, a := range []struct {
+			k string
+			v *float64
+		}{{"motion_pan", m.Pan}, {"motion_tilt", m.Tilt}, {"motion_zoom", m.Zoom}} {
+			if a.v != nil && !math.IsNaN(*a.v) && !math.IsInf(*a.v, 0) {
+				attrs = append(attrs, a.k, *a.v)
+			}
+		}
 	}
 	p.Log.Info("write attempt", attrs...)
 }
