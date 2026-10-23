@@ -228,7 +228,7 @@ func TestValidateRelativeRefusesNonFiniteNumbers(t *testing.T) {
 
 func TestMoveRelativeFaultAfterSendCarriesTheUnknownStateHint(t *testing.T) {
 	fx := newPtzFx(t)
-	fx.on("RelativeMove", func(n int, w http.ResponseWriter, _ *http.Request, _ string) bool {
+	fx.on("RelativeMove", func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool {
 		faultReply(w, "limit reached")
 		return true
 	})
@@ -283,7 +283,7 @@ func TestMoveRelativeIsDestructiveAndNotIdempotent(t *testing.T) {
 
 func TestMoveRelativeNeverReadsConfigurationEvenFromACameraThatFaultsOnIt(t *testing.T) {
 	fx := newPtzFx(t)
-	fx.on("GetConfiguration", func(n int, w http.ResponseWriter, _ *http.Request, _ string) bool {
+	fx.on("GetConfiguration", func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool {
 		faultReply(w, "no configuration")
 		return true
 	})

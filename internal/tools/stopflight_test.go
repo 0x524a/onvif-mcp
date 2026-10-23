@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -190,7 +191,7 @@ func TestFlightTokenSetIsBounded(t *testing.T) {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 			defer cancel()
-			if _, err := f.do(ctx, "k", fmt.Sprintf("p%d", i), run); err == errFlightFull {
+			if _, err := f.do(ctx, "k", fmt.Sprintf("p%d", i), run); errors.Is(err, errFlightFull) {
 				full.Add(1)
 			}
 		}(i)
@@ -230,7 +231,7 @@ func contains(s, sub string) bool { return strings.Contains(s, sub) }
 func TestStopArrivingAfterAMoveIsNeverSwallowedByAnEarlierStop(t *testing.T) {
 	fx := newPtzFx(t)
 	fastGates(t, 5*time.Second, time.Millisecond)
-	fx.on("Stop", func(n int, w http.ResponseWriter, r *http.Request, _ string) bool {
+	fx.on("Stop", func(n int, _ http.ResponseWriter, r *http.Request, _ string) bool {
 		if n == 1 {
 			fx.hold(r)
 		}
@@ -271,7 +272,7 @@ func TestStopArrivingAfterAMoveIsNeverSwallowedByAnEarlierStop(t *testing.T) {
 func TestSecondStopReachesTheCameraWhileTheFirstReplyIsHeld(t *testing.T) {
 	fx := newPtzFx(t)
 	fastGates(t, 200*time.Millisecond, time.Millisecond)
-	fx.on("Stop", func(n int, w http.ResponseWriter, r *http.Request, _ string) bool {
+	fx.on("Stop", func(n int, _ http.ResponseWriter, r *http.Request, _ string) bool {
 		if n == 1 {
 			fx.hold(r)
 		}
@@ -298,7 +299,7 @@ func TestSecondStopReachesTheCameraWhileTheFirstReplyIsHeld(t *testing.T) {
 func TestThirdStopBehindTwoHeldRoundsWaitsAboutStallAfterNotTwoTimeouts(t *testing.T) {
 	fx := newPtzFx(t)
 	fastGates(t, 300*time.Millisecond, time.Millisecond)
-	fx.on("Stop", func(n int, w http.ResponseWriter, r *http.Request, _ string) bool {
+	fx.on("Stop", func(n int, _ http.ResponseWriter, r *http.Request, _ string) bool {
 		if n <= 2 {
 			fx.hold(r)
 		}
@@ -324,7 +325,7 @@ func TestFiftyRotatingProfileTokensCostAboutOneRoundAndSendNoStop(t *testing.T) 
 	fastGates(t, time.Second, time.Millisecond)
 	arrived := make(chan struct{})
 	var once sync.Once
-	fx.on("GetProfiles", func(n int, w http.ResponseWriter, r *http.Request, _ string) bool {
+	fx.on("GetProfiles", func(n int, _ http.ResponseWriter, r *http.Request, _ string) bool {
 		if n <= 2 {
 			once.Do(func() { close(arrived) })
 			select { // hold the first rounds until every caller has arrived
@@ -385,7 +386,7 @@ func TestInvalidProfileNamesTheRealProfilesAndNotTheRetryHint(t *testing.T) {
 func TestWhenGetProfilesFaultsAtMostFourTokensPerRoundGetAStop(t *testing.T) {
 	fx := newPtzFx(t)
 	fastGates(t, time.Second, time.Millisecond)
-	fx.on("GetProfiles", func(n int, w http.ResponseWriter, r *http.Request, _ string) bool {
+	fx.on("GetProfiles", func(_ int, w http.ResponseWriter, r *http.Request, _ string) bool {
 		select {
 		case <-time.After(300 * time.Millisecond):
 		case <-r.Context().Done():
@@ -413,7 +414,7 @@ func TestTenConcurrentStopsOfOneProfileShareFewRoundsAndEachGetsAFreshStop(t *te
 	fx := newPtzFx(t)
 	fastGates(t, time.Second, time.Millisecond)
 	var cur, maxCur atomic.Int32
-	fx.on("Stop", func(n int, w http.ResponseWriter, r *http.Request, _ string) bool {
+	fx.on("Stop", func(_ int, _ http.ResponseWriter, _ *http.Request, _ string) bool {
 		c := cur.Add(1)
 		for {
 			m := maxCur.Load()
@@ -514,7 +515,7 @@ func TestTransportErrorIsRetriedOnceAndSucceeds(t *testing.T) {
 func TestSOAPFaultNamingTheProfileIsNotRetried(t *testing.T) {
 	fx := newPtzFx(t)
 	fastGates(t, time.Second, time.Millisecond)
-	fx.on("Stop", func(n int, w http.ResponseWriter, _ *http.Request, _ string) bool {
+	fx.on("Stop", func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool {
 		faultReply(w, "no such profile token")
 		return true
 	})
@@ -530,7 +531,7 @@ func TestSOAPFaultNamingTheProfileIsNotRetried(t *testing.T) {
 func TestSlowInitializeStillLeavesTheRetryItsOwnTime(t *testing.T) {
 	fx := newPtzFx(t)
 	fastGates(t, time.Second, time.Millisecond)
-	fx.on("GetCapabilities", func(n int, w http.ResponseWriter, r *http.Request, _ string) bool {
+	fx.on("GetCapabilities", func(n int, w http.ResponseWriter, _ *http.Request, _ string) bool {
 		if n == 1 {
 			time.Sleep(1500 * time.Millisecond) // just under attemptTimeout (2s)
 			dropConn(w)
@@ -548,7 +549,7 @@ func TestSlowInitializeStillLeavesTheRetryItsOwnTime(t *testing.T) {
 func TestInitializeFailureIsFailedWithRetryNowHintAndNotSent(t *testing.T) {
 	fx := newPtzFx(t)
 	fastGates(t, time.Second, time.Millisecond)
-	fx.on("GetCapabilities", func(n int, w http.ResponseWriter, _ *http.Request, _ string) bool {
+	fx.on("GetCapabilities", func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool {
 		faultReply(w, "initialising")
 		return true
 	})

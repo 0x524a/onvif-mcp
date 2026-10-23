@@ -16,8 +16,8 @@
 </p>
 
 An agent that can move a camera can also point it at the wrong place, forever, in a loop. onvif-mcp
-gives an agent eleven tools over stdio: ten read the camera, and one moves it behind three
-separate gates. Credentials never appear in a tool argument, every string that leaves the
+gives an agent thirteen tools over stdio on `main`: ten read the camera, and three act on it
+behind separate gates (the v0.1.0 release has eleven; see Status). Credentials never appear in a tool argument, every string that leaves the
 server is scrubbed, and a camera that misbehaves produces an error the agent can act on
 instead of raw SOAP.
 
@@ -27,6 +27,10 @@ v0.1.0 is the first release: eleven tools, ten of them read-only, over stdio.
 It is tested against onvif-go's virtual camera and has not been verified against physical
 cameras, whose quirks it may not yet handle. The server is read-only unless the operator
 starts it with `-enable-control` **and** a camera opts in with `"control": true`.
+
+Unreleased, on `main`: two more gated tools, `ptz.move_relative` and `ptz.stop`. They have only
+been exercised against the virtual camera and hand-written SOAP fixtures; nothing here claims
+they work on a physical camera.
 
 ## Quick start
 
@@ -65,6 +69,8 @@ Go 1.25 or newer is required to build.
 | `ptz.status` | Current PTZ position and movement state | read-only |
 | `ptz.presets` | Stored presets and reported movement limits | read-only |
 | `ptz.goto_preset` | Move a camera to a stored preset | write, gated (see below) |
+| `ptz.move_relative` | Nudge a camera by a small relative amount (at most 0.25 per axis per call) | write, gated (see below) |
+| `ptz.stop` | Stop pan, tilt and zoom on a profile, then report whether the camera confirms it | halt, gated (see below) |
 
 ## How a move is gated
 
@@ -82,9 +88,10 @@ flowchart TD
 ```
 
 Each gate is checked by the server, not requested from the model. Every attempt, allowed or
-refused, is written to stderr as an audit line without arguments or credentials. The details,
-including what happens when a send fails halfway, are under
-[ptz.goto_preset](#ptzgoto_preset).
+refused, is written to stderr as an audit line without arguments or credentials. The diagram
+is the path of a write tool; `ptz.stop` is the exception and skips the dry run and the rate
+limit (see [ptz.move_relative and ptz.stop](#ptzmove_relative-and-ptzstop)). The details,
+including what happens when a send fails halfway, are under [ptz.goto_preset](#ptzgoto_preset).
 
 ## Try it without a camera
 
@@ -97,7 +104,7 @@ must not be reused. Git does not keep file modes, so `make demo` copies the conf
 private temporary file with mode 600 first. Stdin ending (ctrl-d) stops both processes.
 
 **Control is off unless `-enable-control` is passed and the camera sets `"control": true`.**
-With control off, `ptz.goto_preset` does not appear in `tools/list` at all. The demo turns
+With control off, `ptz.goto_preset`, `ptz.move_relative` and `ptz.stop` do not appear in `tools/list` at all. The demo turns
 both on (the flag in the Makefile, `"control": true` in `demo.json`) so you can see a move.
 To see the read-only server instead (ten tools), start `go run ./cmd/demo-camera` in one
 terminal and run onvif-mcp without `-enable-control` against a mode-600 copy of `demo.json`.
@@ -262,7 +269,7 @@ usage error such as an unknown flag or a missing `-config`.
 
 ### `ptz.goto_preset`
 
-The only tool that changes a camera. It takes `camera`, `profile` (a token from
+A tool that changes a camera (so are `ptz.move_relative` and `ptz.stop`, below). It takes `camera`, `profile` (a token from
 `media.profiles` with `has_ptz` true), `preset` (a token from `ptz.presets`) and `dry_run`.
 Three independent gates stand between an agent and a moving motor:
 
@@ -293,10 +300,57 @@ camera's `timeout_seconds`. Every attempt, dry or real, and
 every refusal is written to stderr with the tool, camera, dry-run state, whether it executed,
 the outcome and the preset token. Arguments and credentials are never logged.
 
-v0.1 performs no clamping. The target is a preset the camera stored itself, so it is
-reachable by construction; `reported_limits` is informational and is never compared with
-the target. When absolute or relative moves are added, a camera that reports no limits will
-fail closed rather than fall back to a guessed range.
+`ptz.goto_preset` performs no clamping. The target is a preset the camera stored itself, so it
+is reachable by construction; `reported_limits` is informational and is never compared with
+the target. Absolute moves are not offered; if they are ever added, a camera that reports no
+limits will fail closed rather than fall back to a guessed range.
+
+### `ptz.move_relative` and `ptz.stop`
+
+`ptz.move_relative` takes `camera`, `profile` (a token from `media.profiles` with `has_ptz`
+true), `dry_run` and any of `pan`, `tilt`, `zoom`. It is gated exactly like `ptz.goto_preset`
+(control flag, per-camera opt-in, `dry_run` true by default, the same per-device rate limit,
+sent once and never retried).
+
+- **Units.** The numbers are sent in the ONVIF generic translation space, with the space URI
+  set explicitly on each vector; the dry run and the result show it (`space_sent`). What a
+  value means physically, and which way a positive value moves the camera, is defined by the
+  camera. After a small move check `ptz.status` or `camera.snapshot`. The server never
+  converts between spaces.
+- **Cap, refuse not clamp.** Each axis must be at most 0.25 in magnitude per call, at least
+  one must be non-zero, and an omitted axis is 0. Anything else is refused with
+  `invalid_argument` naming the field, the legal range, the source (the server's own cap) and
+  a corrected call. Nothing is clamped silently, a refusal sends nothing, and it gives the
+  rate token back.
+- **No speed, no limits lookup.** The camera's default speed applies and may be its maximum.
+  Relative moves do not consult the camera's reported limits; they are bounded by the cap, the
+  rate limit and the dry-run default. The server cannot detect a camera that ignores the
+  `Space` it was sent; the effect of one capped step on such a camera depends on the camera.
+- **Finite.** The camera ends a relative move itself; nothing in this server has to stay alive
+  for it to end.
+
+`ptz.stop` takes `camera` and `profile` only. It has no `dry_run` and is **not** rate limited,
+and a missing audit log cannot block it: the one call that must always get through. It still
+requires the process to run with `-enable-control` and the camera to have opted in, because
+the server can only have moved a camera that was granted. It runs detached from the request, so
+a client cancel or a shutdown signal cannot abort a stop that was already dispatched. It sends
+`Stop` for pan/tilt and zoom, with one immediate retry on a transport error, then reads the
+status up to three times. `stop_status` is `confirmed_idle` (the camera reports idle),
+`sent_unconfirmed` (delivered, but the camera said MOVING or UNKNOWN, reported no movement
+state, or could not be read) or, as an error, a stop that was not delivered: call `ptz.stop`
+again immediately. Stop is per profile: it addresses the profile you pass, so if you are unsure
+which profile moved, call it once per `has_ptz` profile. A burst of stops is bounded per device
+(at most two rounds in flight; a profile token that does not exist costs no `Stop`).
+
+Honest limits of this version: a looping model can still issue up to 30 capped steps a minute
+per device, and there is no cumulative travel budget; on an endless-rotation pan dome that can
+turn the head continuously, and on any camera repeated steps wear the motors. This residual risk
+is accepted because real calls default to dry runs, the rate limit holds a loop to 30 steps a
+minute, and the audit trail makes a loop visible. Continuous and absolute moves are not offered.
+
+A shutdown signal (SIGINT or SIGTERM) starts an orderly exit. A second signal within 5 seconds
+is held, so it cannot abort a dispatched stop or a move in flight; a signal after those 5
+seconds ends the process at once, aborting whatever is still running.
 
 To enable it for one camera:
 
@@ -435,8 +489,14 @@ never printed. The read matrix calls the read tools per camera, accepts `not_sup
 vendor quirks, checks the result envelope and that no password appears in any output, and logs
 only camera id, tool name and outcome code.
 
-One test physically moves a camera, so it needs a second, explicit opt-in:
-`ONVIF_MCP_HW_MOVE=<camera-id>:<profile-token>:<preset-token>`. It names exactly one camera and
+Two tests physically move a camera, so each needs a second, explicit opt-in.
+
+`ONVIF_MCP_HW_NUDGE=<camera-id>:<profile-token>` runs the relative-move test: it checks that
+omitting `dry_run` sends nothing and that a pan of 0.5 is refused, sends a pan of +0.05, waits
+out the per-device rate limit, sends -0.05, and always ends with `ptz.stop`. It has not been run
+against hardware, and it cannot judge whether the camera is free to move a little each way.
+
+`ONVIF_MCP_HW_MOVE=<camera-id>:<profile-token>:<preset-token>` runs the preset test. It names exactly one camera and
 one preset, calls once without `dry_run` to confirm that is a dry run, then moves once, checks
 the rate limiter refuses an immediate repeat, and polls `ptz.status` until the camera settles.
 `ONVIF_MCP_HW_RETURN=<preset-token>` optionally sends it back afterwards. You must confirm the
@@ -456,8 +516,17 @@ onvif-mcp deliberately exposes a small surface. It does **not**:
 - Subscribe to or pull ONVIF events. The client library supports PullPoint, but the
   virtual camera used for testing implements no events service, so it cannot be
   covered without hardware.
-- Perform continuous, relative, or absolute PTZ movement. Only `ptz.goto_preset`
-  moves a camera, because a preset is a target the camera itself stored.
+- Perform continuous or absolute PTZ movement, or set a speed. A camera moves only through
+  `ptz.goto_preset` (a target the camera stored itself) and `ptz.move_relative` (finite, at
+  most 0.25 per axis per call, the camera's default speed). `ptz.stop` only stops.
+- Bound the total travel of repeated relative moves. There is no cumulative budget; the
+  limit is the cap per call and 30 calls a minute per device (shared with `ptz.goto_preset`).
+  On an endless-rotation pan dome a looping model can spin the head. It does not detect a
+  camera that ignores the generic translation space it is sent, and it does not read the
+  camera's reported limits for relative moves.
+- Guarantee a stop reaches a camera that is unreachable, or confirm one on a camera that
+  reports no movement state: `sent_unconfirmed` is the honest answer there. A second
+  shutdown signal more than 5 seconds after the first aborts an in-flight stop.
 - Change imaging settings, reboot a device, manage users, or alter network
   configuration.
 - Serve video. It reports stream URIs and inspects stream metadata; it never

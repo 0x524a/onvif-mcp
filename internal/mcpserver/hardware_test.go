@@ -328,3 +328,92 @@ func TestHardwareGatedMove(t *testing.T) {
 		}
 	}
 }
+
+// TestHardwareRelativeNudge physically moves one camera by a small relative
+// amount and back, then calls ptz.stop. NOT YET RUN against hardware.
+//
+// It skips unless ONVIF_MCP_HW_NUDGE is exactly <camera-id>:<profile-token>. The
+// OPERATOR must confirm the camera may move a little in both directions from
+// where it is now and that nobody depends on its view during the run.
+//
+// Both gates are enabled in memory for the named camera only. It sends +0.05 on
+// pan, waits past the per-device rate-limit interval (a second real move inside
+// it would be refused), sends -0.05, and calls ptz.stop. Whatever the camera
+// reports is logged as a code or a status only; the test does not judge where
+// the camera ended up.
+func TestHardwareRelativeNudge(t *testing.T) {
+	spec := os.Getenv("ONVIF_MCP_HW_NUDGE")
+	if spec == "" {
+		t.Skip("ONVIF_MCP_HW_NUDGE not set; this test physically moves a camera")
+	}
+	parts := strings.Split(spec, ":")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		t.Fatal("ONVIF_MCP_HW_NUDGE must be <camera-id>:<profile-token>")
+	}
+	camID, profile := parts[0], parts[1]
+
+	cfg := hwConfig(t)
+	cam, ok := cfg.Cameras[camID]
+	if !ok {
+		t.Fatalf("camera %q is not in the hardware config", camID)
+	}
+	cfg.ControlEnabled = true
+	cam.Control = true
+	cs := hwSession(t, cfg)
+
+	nudge := func(pan float64, dry *bool) hwEnvelope {
+		m := map[string]any{"camera": camID, "profile": profile, "pan": pan}
+		if dry != nil {
+			m["dry_run"] = *dry
+		}
+		env, _ := hwCall(t, cs, "ptz.move_relative", m)
+		return env
+	}
+	// Whatever happens, ask for a stop at the end.
+	defer func() {
+		env, _ := hwCall(t, cs, "ptz.stop", map[string]any{"camera": camID, "profile": profile})
+		if env.Error != nil {
+			t.Errorf("ptz.stop failed: %s (check the camera by hand)", env.Error.Code)
+			return
+		}
+		var d struct {
+			StopStatus string `json:"stop_status"`
+		}
+		_ = json.Unmarshal(env.Data, &d)
+		t.Logf("ptz.stop: %s", d.StopStatus)
+	}()
+
+	// 1. Omitting dry_run must simulate and send nothing.
+	env := nudge(0.05, nil)
+	var d struct {
+		Executed bool `json:"executed"`
+		DryRun   bool `json:"dry_run"`
+	}
+	_ = json.Unmarshal(env.Data, &d)
+	if env.Error != nil || d.Executed || !d.DryRun {
+		t.Fatalf("default call must be a dry run that does not execute (error present: %t)", env.Error != nil)
+	}
+
+	// 2. A value over the cap is refused by the server, not the camera.
+	if env := nudge(0.5, nil); env.Error == nil || env.Error.Code != "invalid_argument" {
+		t.Errorf("a pan of 0.5 must be refused with invalid_argument")
+	}
+
+	// 3. +0.05, wait out the limiter, -0.05.
+	no := false
+	for i, pan := range []float64{0.05, -0.05} {
+		if i > 0 {
+			time.Sleep(safety.DefaultInterval + time.Second)
+		}
+		env = nudge(pan, &no)
+		if env.Error != nil {
+			t.Fatalf("nudge %d failed: %s (the camera may or may not have moved; check it by hand)", i+1, env.Error.Code)
+		}
+		d.Executed = false
+		_ = json.Unmarshal(env.Data, &d)
+		if !d.Executed {
+			t.Errorf("nudge %d: dry_run=false did not execute", i+1)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}

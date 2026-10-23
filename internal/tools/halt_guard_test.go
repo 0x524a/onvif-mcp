@@ -37,7 +37,7 @@ type haltRig struct {
 	sawCtxOK atomic.Bool
 }
 
-func newHaltRig(t *testing.T, control bool, base context.Context, withLog bool) *haltRig {
+func newHaltRig(base context.Context, t *testing.T, control, withLog bool) *haltRig {
 	t.Helper()
 	reg := registry.New(&config.Config{Cameras: map[string]*config.Camera{
 		"cam-a":     {ID: "cam-a", Endpoint: "http://192.0.2.1/onvif/device_service", Control: true},
@@ -169,7 +169,7 @@ func TestGotoPresetAnnotationsAreUnchanged(t *testing.T) {
 }
 
 func TestHaltToolIsAbsentWithControlOffButNamedByThePolicy(t *testing.T) {
-	r := newHaltRig(t, false, nil, true)
+	r := newHaltRig(context.Background(), t, false, true)
 	res, err := r.cs.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +188,7 @@ func TestHaltToolIsAbsentWithControlOffButNamedByThePolicy(t *testing.T) {
 }
 
 func TestHaltToolListsHaltAnnotationsNotWriteOnes(t *testing.T) {
-	r := newHaltRig(t, true, nil, true)
+	r := newHaltRig(context.Background(), t, true, true)
 	res, err := r.cs.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -212,7 +212,7 @@ func TestHaltToolListsHaltAnnotationsNotWriteOnes(t *testing.T) {
 
 func TestHaltCallsAreNeverRateLimitedOrBlockedByAMissingLog(t *testing.T) {
 	for _, withLog := range []bool{true, false} {
-		r := newHaltRig(t, true, nil, withLog)
+		r := newHaltRig(context.Background(), t, true, withLog)
 		r.policy.Limiter = nil
 		for i := 0; i < 50; i++ {
 			res := call(t, r.cs, "test.halt", map[string]any{"camera": "cam-a"})
@@ -227,7 +227,7 @@ func TestHaltCallsAreNeverRateLimitedOrBlockedByAMissingLog(t *testing.T) {
 }
 
 func TestHaltCallRefusalsMatchTheGrantRules(t *testing.T) {
-	r := newHaltRig(t, true, nil, true)
+	r := newHaltRig(context.Background(), t, true, true)
 	if code, _ := errCode(t, call(t, r.cs, "test.halt", map[string]any{"camera": "cam-fixed"})); code != "blocked_by_policy" {
 		t.Errorf("not granted: code = %q", code)
 	}
@@ -242,7 +242,7 @@ func TestHaltCallRefusalsMatchTheGrantRules(t *testing.T) {
 func TestHaltRunsOnAContextThatIgnoresRequestCancelAndBaseCancel(t *testing.T) {
 	base, cancelBase := context.WithCancel(context.Background())
 	cancelBase() // shutdown already begun
-	r := newHaltRig(t, true, base, true)
+	r := newHaltRig(base, t, true, true)
 
 	// Handler called directly with an already cancelled request context.
 	h := haltHandler(r.d, "test.halt", r.run)

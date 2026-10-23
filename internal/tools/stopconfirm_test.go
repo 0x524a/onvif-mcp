@@ -60,7 +60,7 @@ func TestUnknownStateIsNeverConfirmedIdle(t *testing.T) {
 func TestSettlingAfterTheFirstPollIsConfirmed(t *testing.T) {
 	fx := newPtzFx(t)
 	fastGates(t, time.Second, time.Millisecond)
-	fx.on("GetStatus", func(n int, w http.ResponseWriter, _ *http.Request, _ string) bool {
+	fx.on("GetStatus", func(n int, _ http.ResponseWriter, _ *http.Request, _ string) bool {
 		if n == 1 {
 			fx.setStatus(`<tt:PanTilt>MOVING</tt:PanTilt>`)
 		} else {
@@ -80,7 +80,7 @@ func TestSettlingAfterTheFirstPollIsConfirmed(t *testing.T) {
 func TestStopFaultIsFailedAndConfirmationNeverRuns(t *testing.T) {
 	fx := newPtzFx(t)
 	fastGates(t, time.Second, time.Millisecond)
-	fx.on("Stop", func(n int, w http.ResponseWriter, _ *http.Request, _ string) bool {
+	fx.on("Stop", func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool {
 		faultReply(w, "motor busy")
 		return true
 	})
@@ -99,7 +99,7 @@ func TestStopFaultIsFailedAndConfirmationNeverRuns(t *testing.T) {
 func TestEmptyStopReplyCanOnlyBeSentUnconfirmed(t *testing.T) {
 	fx := newPtzFx(t)
 	fastGates(t, time.Second, time.Millisecond)
-	fx.on("Stop", func(n int, w http.ResponseWriter, _ *http.Request, _ string) bool {
+	fx.on("Stop", func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool {
 		w.WriteHeader(http.StatusOK) // 200, empty body
 		return true
 	})
@@ -112,7 +112,7 @@ func TestEmptyStopReplyCanOnlyBeSentUnconfirmed(t *testing.T) {
 func TestStatusReadFailureAfterAGoodStopIsSentUnconfirmed(t *testing.T) {
 	fx := newPtzFx(t)
 	fastGates(t, time.Second, time.Millisecond)
-	fx.on("GetStatus", func(n int, w http.ResponseWriter, _ *http.Request, _ string) bool {
+	fx.on("GetStatus", func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool {
 		faultReply(w, "no status")
 		return true
 	})

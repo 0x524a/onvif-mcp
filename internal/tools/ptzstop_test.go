@@ -181,7 +181,7 @@ func TestPTZStopHugeProfileIsRefusedBeforeAnyCameraTraffic(t *testing.T) {
 
 func TestPTZStopSOAPFaultAfterDispatchIsFailedWithRetryNowHint(t *testing.T) {
 	fx := newPtzFx(t)
-	fx.on("Stop", func(n int, w http.ResponseWriter, _ *http.Request, _ string) bool {
+	fx.on("Stop", func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool {
 		faultReply(w, "motor busy")
 		return true
 	})
@@ -202,8 +202,8 @@ func TestPTZStopSOAPFaultAfterDispatchIsFailedWithRetryNowHint(t *testing.T) {
 
 func TestPTZStopInitializeFailureIsFailedAndAuditedAsNotExecuted(t *testing.T) {
 	for name, hook := range map[string]func(int, http.ResponseWriter, *http.Request, string) bool{
-		"unreachable": func(n int, w http.ResponseWriter, _ *http.Request, _ string) bool { dropConn(w); return true },
-		"soap fault": func(n int, w http.ResponseWriter, _ *http.Request, _ string) bool {
+		"unreachable": func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool { dropConn(w); return true },
+		"soap fault": func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool {
 			faultReply(w, "not ready")
 			return true
 		},

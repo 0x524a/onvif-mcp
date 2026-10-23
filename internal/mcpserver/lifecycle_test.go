@@ -124,17 +124,17 @@ func waitClosed(t *testing.T, ch <-chan struct{}, within time.Duration, what str
 	}
 }
 
-func notClosed(t *testing.T, ch <-chan struct{}, for_ time.Duration, what string) {
+func notClosed(t *testing.T, ch <-chan struct{}, d time.Duration, what string) {
 	t.Helper()
 	select {
 	case <-ch:
 		t.Fatalf("%s: happened, it must not", what)
-	case <-time.After(for_):
+	case <-time.After(d):
 	}
 }
 
 // startBlocked begins a "block" call and waits until the handler is running.
-func startBlocked(t *testing.T, r *lifecycleRig, s *session, ctx context.Context) {
+func startBlocked(ctx context.Context, t *testing.T, r *lifecycleRig, s *session) {
 	t.Helper()
 	go func() { _, _ = s.cs.CallTool(ctx, &mcp.CallToolParams{Name: "block", Arguments: map[string]any{}}) }()
 	waitClosed(t, chanOf(r.started), 5*time.Second, "handler start")
@@ -152,7 +152,7 @@ func TestLifecycleSecondCallReturnsWhileFirstIsBlocked(t *testing.T) {
 		t.Run(k.name, func(t *testing.T) {
 			r := newLifecycleRig()
 			s := k.open(t, r)
-			startBlocked(t, r, s, context.Background())
+			startBlocked(context.Background(), t, r, s)
 			done := make(chan error, 1)
 			go func() {
 				_, err := s.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "quick", Arguments: map[string]any{}})
@@ -178,7 +178,7 @@ func TestLifecycleClientCancelCancelsHandlerContext(t *testing.T) {
 			r := newLifecycleRig()
 			s := k.open(t, r)
 			callCtx, cancel := context.WithCancel(context.Background())
-			startBlocked(t, r, s, callCtx)
+			startBlocked(callCtx, t, r, s)
 			cancel()
 			waitClosed(t, r.ctxDone, time.Second, "handler context cancelled by notifications/cancelled")
 		})
@@ -199,7 +199,7 @@ func TestLifecycleClientEOFCancelsHandlerContext(t *testing.T) {
 		t.Run(k.name, func(t *testing.T) {
 			r := newLifecycleRig()
 			s := k.open(t, r)
-			startBlocked(t, r, s, context.Background())
+			startBlocked(context.Background(), t, r, s)
 			go s.eof()
 			waitClosed(t, r.ctxDone, time.Second, "handler context cancelled by client EOF")
 		})
@@ -213,7 +213,7 @@ func TestLifecycleRunContextDoesNotCancelHandlerAndRunWaitsForIt(t *testing.T) {
 		t.Run(k.name, func(t *testing.T) {
 			r := newLifecycleRig()
 			s := k.open(t, r)
-			startBlocked(t, r, s, context.Background())
+			startBlocked(context.Background(), t, r, s)
 			s.cancelRn()
 			notClosed(t, r.ctxDone, 400*time.Millisecond, "handler context cancelled by the Run context")
 			select {

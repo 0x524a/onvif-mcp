@@ -7,6 +7,42 @@ matching the pushed tag as the GitHub Release notes, so every tag needs a non-em
 
 ## [Unreleased]
 
+### Added
+
+- `ptz.move_relative` (write, gated): nudge a PTZ camera by a small relative amount in the ONVIF
+  generic translation space, with the space URI set explicitly on each vector. Each axis is capped at
+  0.25 per call by the server; larger values are refused, not clamped, with an `invalid_argument`
+  that names the field, the range, the source and a corrected call. Dry run by default, rate limited
+  per device (shared with `ptz.goto_preset`), sent once and never retried, audited with the typed
+  numbers sent. Relative moves do not consult the camera's reported limits.
+- `ptz.stop` (halt, gated): stop pan, tilt and zoom on a profile, then read the status and report
+  `confirmed_idle` or `sent_unconfirmed`; a stop that cannot be delivered is an error. It has no dry
+  run, is never rate limited, does not need the audit log, and runs detached from the request and
+  from shutdown. Bursts are bounded per device (two rounds in flight, profile tokens validated against
+  the camera's own list). Stop is per profile.
+- A third risk class, `RiskHalt`, in `internal/safety`, with `Policy.EvaluateHalt`, `HaltInput` and
+  `HaltAnnotations`; a `NonIdempotent` registration option for writes that compound; a typed
+  `WithMotion` audit option.
+- The `onvif://server/policy` resource names the new tools, lists `halt_tools`, and says `ptz.stop` has
+  no dry run and is not rate limited.
+- Shutdown: a second SIGINT or SIGTERM inside 5 seconds of the first is held so it cannot abort a
+  dispatched stop or a move in flight; a signal after that ends the process at once.
+- An opt-in `hardware` test for a relative nudge pair and `ptz.stop` (`ONVIF_MCP_HW_NUDGE`); it has
+  not been run against hardware.
+- Tests that pin the go-sdk v1.7.0 handler-context and shutdown behaviour this design relies on.
+
+### Changed
+
+- With control on, `tools/list` now has thirteen tools (was eleven). With control off it is unchanged.
+- The server reports version `v0.2.0` from source. Nothing is tagged or released yet: the release waits
+  for the Streamable HTTP work.
+
+### Not included
+
+Continuous and absolute PTZ moves, a speed parameter, a cumulative travel budget for relative moves,
+and verification on physical cameras. A looping model can still issue up to 30 capped steps a minute
+per device.
+
 ## [0.1.0]
 
 First release: a Model Context Protocol server (Go, stdio transport) that exposes ONVIF IP camera
