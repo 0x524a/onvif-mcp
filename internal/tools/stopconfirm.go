@@ -405,8 +405,8 @@ poll:
 		if reason == "" {
 			reason = "the camera did not confirm"
 		}
-		rep.Note = "The stop was delivered, but it is not confirmed: " + reason +
-			". Check with ptz.status or camera.snapshot, and call ptz.stop again if the camera is still moving."
+		rep.Note = "The stop was delivered but not confirmed: " + reason +
+			". Check ptz.status or camera.snapshot; call ptz.stop again if it still moves."
 	}
 	return rep
 }

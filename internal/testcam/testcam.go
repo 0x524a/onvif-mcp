@@ -219,7 +219,28 @@ func (c *Cam) PTZPosition() server.PTZPosition {
 	return pos
 }
 
-func (c *Cam) ptzPosition() (server.PTZPosition, error) {
+// PTZMoveState returns the first profile's pan/tilt and zoom move state ("IDLE",
+// "MOVING", ...) from one PTZ GetStatus, without waiting for a move to settle.
+// Unlike PTZPosition it returns at once, so a test can observe MOVING.
+func (c *Cam) PTZMoveState() (panTilt, zoom string) {
+	cl, err := c.ptzClient()
+	if err != nil {
+		panic(fmt.Sprintf("testcam: PTZMoveState: %v", err))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), settleTimeout)
+	defer cancel()
+	st, err := cl.GetStatus(ctx, c.profile)
+	if err != nil {
+		panic(fmt.Sprintf("testcam: PTZMoveState: %v", err))
+	}
+	if st.MoveStatus == nil {
+		return "", ""
+	}
+	return st.MoveStatus.PanTilt, st.MoveStatus.Zoom
+}
+
+// ptzClient returns the harness's own initialised client, built once.
+func (c *Cam) ptzClient() (*onvif.Client, error) {
 	c.clientOnce.Do(func() {
 		cl, err := onvif.NewClient(c.Endpoint(), onvif.WithCredentials(c.Username(), c.Password()))
 		if err == nil {
@@ -227,8 +248,12 @@ func (c *Cam) ptzPosition() (server.PTZPosition, error) {
 		}
 		c.client, c.clientErr = cl, err
 	})
-	if c.clientErr != nil {
-		return server.PTZPosition{}, c.clientErr
+	return c.client, c.clientErr
+}
+
+func (c *Cam) ptzPosition() (server.PTZPosition, error) {
+	if _, err := c.ptzClient(); err != nil {
+		return server.PTZPosition{}, err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), settleTimeout)
