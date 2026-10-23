@@ -23,7 +23,7 @@ instead of raw SOAP.
 
 ## Status
 
-v0.1.0 is the first release candidate: eleven tools, ten of them read-only, over stdio.
+v0.1.0 is the first release: eleven tools, ten of them read-only, over stdio.
 It is tested against onvif-go's virtual camera and has not been verified against physical
 cameras, whose quirks it may not yet handle. The server is read-only unless the operator
 starts it with `-enable-control` **and** a camera opts in with `"control": true`.
