@@ -90,7 +90,7 @@ func TestHugeCameraIDIsNotScrubbedWholeOnTheCancelledPath(t *testing.T) {
 	}
 	in := nudgeIn{WriteBase: safety.WriteBase{Camera: string(big), DryRun: new(bool)}}
 	t0 := time.Now()
-	res, out, err := h(context.Background(), nil, in)
+	res, out, err := h(asOperator(context.Background()), nil, in)
 	if el := time.Since(t0); el > 500*time.Millisecond {
 		t.Errorf("handler took %v", el)
 	}
@@ -129,7 +129,7 @@ func TestWriteIsNotStartedWhenShutdownBeginsDuringEvaluation(t *testing.T) {
 			execs.Add(1)
 			return nil, mcperr.OK(nudgeOut{Moved: true}), nil
 		}, nudgeNoop)
-	res, _, err := h(reqCtx, nil, nudgeIn{WriteBase: safety.WriteBase{Camera: "cam-a", DryRun: new(bool)}})
+	res, _, err := h(asOperator(reqCtx), nil, nudgeIn{WriteBase: safety.WriteBase{Camera: "cam-a", DryRun: new(bool)}})
 	if err != nil || res == nil || !res.IsError || execs.Load() != 0 {
 		t.Fatalf("res=%v err=%v execs=%d", res, err, execs.Load())
 	}

@@ -65,6 +65,23 @@ type options struct {
 	base             context.Context
 	prober           probe.Prober
 	snapshotMaxBytes int
+	callers          CallerSource
+	http             *HTTPGuardOptions
+}
+
+// WithCallerSource sets how the server learns who is calling. Without it no
+// request has a caller, so tools/call and resources/read are refused: a
+// transport must establish identity explicitly (StdioOperator or HTTPCallers).
+func WithCallerSource(s CallerSource) Option {
+	return func(o *options) { o.callers = s }
+}
+
+// WithHTTPGuard marks the server as serving the HTTP transport and installs the
+// HTTP-only middleware (see httpGuard). HTTP offers no write tool, so New
+// panics if the policy has control enabled, and sets the policy's
+// WritesUnavailable text so the policy resource tells the truth.
+func WithHTTPGuard(g HTTPGuardOptions) Option {
+	return func(o *options) { o.http = &g }
 }
 
 // WithBaseContext makes every tool call also stop when base is done. The SDK
@@ -170,13 +187,30 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 	for _, f := range opts {
 		f(&o)
 	}
+	if o.http != nil && policy != nil {
+		if policy.WriteRegistered() {
+			// A programming error in the wiring, like GuardedTool misuse: fail
+			// on every run rather than ever offering a write tool over HTTP.
+			panic("mcpserver.New: write tools must not be registered on the HTTP transport")
+		}
+		if policy.WritesUnavailable == "" {
+			policy.WritesUnavailable = HTTPWritesUnavailable
+		}
+	}
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    "onvif-mcp",
 		Version: version,
 	}, nil)
-	// The first middleware added is the outermost. auditRejected must wrap
-	// everything, including the SDK's own argument validation.
-	srv.AddReceivingMiddleware(auditRejected(policy), argumentErrors)
+	// The first middleware added is the outermost. callerContext is first so
+	// every later stage can rely on the Caller; httpGuard (HTTP only) is next so
+	// its refusals are audited with the caller; auditRejected must wrap
+	// everything else, including the SDK's own argument validation.
+	mws := []mcp.Middleware{callerContext(o.callers)}
+	if o.http != nil {
+		mws = append(mws, httpGuard(*o.http))
+	}
+	mws = append(mws, auditRejected(policy), argumentErrors)
+	srv.AddReceivingMiddleware(mws...)
 	prober := o.prober
 	if prober == nil {
 		prober = probe.NewRTSP()

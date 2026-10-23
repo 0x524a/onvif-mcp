@@ -119,7 +119,14 @@ func (b bearerRT) RoundTrip(r *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
-func postJSON(t *testing.T, url string, hdr map[string]string, body []byte) (*http.Response, string) {
+// reply is the status and headers of a response whose body postJSON has read
+// and closed.
+type reply struct {
+	StatusCode int
+	Header     http.Header
+}
+
+func postJSON(t *testing.T, url string, hdr map[string]string, body []byte) (*reply, string) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -144,7 +151,7 @@ func postJSON(t *testing.T, url string, hdr map[string]string, body []byte) (*ht
 	}
 	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(resp.Body)
-	return resp, string(b)
+	return &reply{StatusCode: resp.StatusCode, Header: resp.Header}, string(b)
 }
 
 func callBody(tool string, ms int) []byte {
@@ -236,7 +243,7 @@ func TestPinSDKHostCheckScope(t *testing.T) {
 		t.Log("no non-loopback IPv4 interface; wildcard-scope half of the pin skipped")
 		return
 	}
-	l, err := net.Listen("tcp", "0.0.0.0:0")
+	l, err := net.Listen("tcp", "0.0.0.0:0") //nolint:gosec // test-only wildcard bind to prove the SDK check is bind-scoped
 	if err != nil {
 		t.Skip(err)
 	}
@@ -316,8 +323,9 @@ func TestPinHandlerOutlivesRequest(t *testing.T) {
 			for k, v := range tc.hdr {
 				req.Header.Set(k, v)
 			}
-			_, err := http.DefaultClient.Do(req)
+			resp, err := http.DefaultClient.Do(req)
 			if err == nil {
+				_ = resp.Body.Close()
 				t.Fatal("expected the client to abort")
 			}
 			time.Sleep(300 * time.Millisecond)

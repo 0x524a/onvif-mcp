@@ -248,7 +248,7 @@ func TestHaltRunsOnAContextThatIgnoresRequestCancelAndBaseCancel(t *testing.T) {
 	h := haltHandler(r.d, "test.halt", r.run)
 	reqCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	res, out, err := h(reqCtx, nil, haltIn{Camera: "cam-a"})
+	res, out, err := h(asOperator(reqCtx), nil, haltIn{Camera: "cam-a"})
 	if err != nil || res == nil || out.Error != nil || out.Data == nil || !out.Data.Ran {
 		t.Fatalf("halt refused under cancelled contexts: res=%v out=%+v err=%v", res, out, err)
 	}
@@ -273,7 +273,7 @@ func TestHaltAuditsOutcomeAndSurvivesAPanic(t *testing.T) {
 	h := haltHandler(d, "test.halt", func(context.Context, *mcp.CallToolRequest, haltIn) (*mcp.CallToolResult, mcperr.Out[haltOut], error) {
 		panic("boom password=hunter2-secret")
 	})
-	res, out, _ := h(context.Background(), nil, haltIn{Camera: "cam-a"})
+	res, out, _ := h(asOperator(context.Background()), nil, haltIn{Camera: "cam-a"})
 	if out.Error == nil || out.Error.Code != mcperr.CodeInternal || res == nil || !res.IsError {
 		t.Fatalf("a panic must become an internal tool error: %+v", out)
 	}

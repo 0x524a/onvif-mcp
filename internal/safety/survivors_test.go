@@ -43,8 +43,8 @@ func TestBackwardsClockDoesNotDrainTokens(t *testing.T) {
 func TestRetryAfterRoundsUpFractionalSeconds(t *testing.T) {
 	p, _, clk := newPolicy(true)
 	p.Limiter = NewLimiter(1500*time.Millisecond, 1, WithClock(clk.Now))
-	p.Evaluate("cam-a", tool, false)
-	d := p.Evaluate("cam-a", tool, false)
+	p.Evaluate(opCtx(), "cam-a", tool, false)
+	d := p.Evaluate(opCtx(), "cam-a", tool, false)
 	if d.Blocked == nil || d.Blocked.RetryAfterSeconds == nil || *d.Blocked.RetryAfterSeconds != 2 {
 		t.Fatalf("1.5s wait must report retry_after_seconds=2, got %+v", d.Blocked)
 	}
@@ -61,7 +61,7 @@ func TestAllowSuccessReportsZeroWait(t *testing.T) {
 // kills M94
 func TestBlockedAuditIsWarnLevel(t *testing.T) {
 	p, buf, _ := newPolicy(true)
-	p.Evaluate("cam-fixed", tool, false)
+	p.Evaluate(opCtx(), "cam-fixed", tool, false)
 	r := buf.records(t)
 	if len(r) != 1 || r[0]["level"] != "WARN" {
 		t.Fatalf("refusal must log at WARN: %v", r)
@@ -71,7 +71,7 @@ func TestBlockedAuditIsWarnLevel(t *testing.T) {
 // kills M100/M96
 func TestBlockedDecisionKeepsDryRunFlag(t *testing.T) {
 	p, _, _ := newPolicy(true)
-	if d := p.Evaluate("cam-fixed", tool, true); d.Blocked == nil || !d.DryRun {
+	if d := p.Evaluate(opCtx(), "cam-fixed", tool, true); d.Blocked == nil || !d.DryRun {
 		t.Fatalf("%+v", d)
 	}
 }

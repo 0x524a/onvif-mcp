@@ -15,14 +15,24 @@ import (
 
 	"github.com/0x524a/onvif-mcp/internal/config"
 	"github.com/0x524a/onvif-mcp/internal/registry"
+	"github.com/0x524a/onvif-mcp/internal/safety"
 	"github.com/0x524a/onvif-mcp/internal/testcam"
 )
 
 func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // connectTo wires an in-memory client to srv. The server connects first.
+//
+// These tests exercise the tools as the stdio operator would, so connectTo
+// installs middleware that supplies safety.StdioOperator() to every request. The
+// caller gate itself is tested in internal/safety and internal/mcpserver.
 func connectTo(t *testing.T, srv *mcp.Server) *mcp.ClientSession {
 	t.Helper()
+	srv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			return next(safety.WithCaller(ctx, safety.StdioOperator()), method, req)
+		}
+	})
 	st, ct := mcp.NewInMemoryTransports()
 	ctx := context.Background()
 	ss, err := srv.Connect(ctx, st, nil)
@@ -200,4 +210,10 @@ func wireOf(t *testing.T, v any) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// asOperator returns ctx carrying the stdio operator, for tests that call a
+// handler directly instead of through the MCP server.
+func asOperator(ctx context.Context) context.Context {
+	return safety.WithCaller(ctx, safety.StdioOperator())
 }

@@ -66,7 +66,7 @@ func hwSession(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 	t.Helper()
 	reg := registry.New(cfg)
 	pol := safety.NewPolicy(safety.PolicyOptions{ControlEnabled: cfg.ControlEnabled, Cameras: reg, Log: quietLog()})
-	return connect(t, New(reg, quietLog(), pol))
+	return connect(t, newOp(reg, quietLog(), pol))
 }
 
 // hwCall calls a tool and returns the decoded envelope plus all text a client

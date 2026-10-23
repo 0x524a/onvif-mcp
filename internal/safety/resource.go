@@ -55,6 +55,9 @@ const whyEnabledText = "write tools physically move or reconfigure a real camera
 	"must also opt in individually"
 
 func (p *Policy) document(cams []CameraGrant) policyDoc {
+	if p != nil && p.WritesUnavailable != "" {
+		return p.readOnlyTransportDocument(cams)
+	}
 	enabled := p != nil && p.ControlEnabled
 	mode := "read-only"
 	if enabled {
@@ -114,6 +117,29 @@ func (p *Policy) document(cams []CameraGrant) policyDoc {
 		DryRunDefault:      true,
 		Explanation:        explanation,
 		Why:                why,
+	}
+}
+
+// readOnlyTransportDocument is the policy for a transport that offers no write
+// tool. It depends on nothing about the caller, so it is the same for everyone.
+func (p *Policy) readOnlyTransportDocument(cams []CameraGrant) policyDoc {
+	grants := make([]CameraGrant, 0, len(cams))
+	for _, c := range cams {
+		c.Writable = false
+		grants = append(grants, c)
+	}
+	return policyDoc{
+		Mode:               "read-only",
+		ControlEnabled:     false,
+		GatedWriteTools:    []string{},
+		HaltTools:          []string{},
+		Cameras:            grants,
+		RateLimitPerCamera: "not applicable: no movement is possible on this transport",
+		HowToEnable:        p.WritesUnavailable,
+		DryRunDefault:      true,
+		Explanation: "every tool offered on this transport is read-only; control_allowed on a camera " +
+			"is the camera's own opt-in for transports that offer write tools and has no effect here",
+		Why: whyText,
 	}
 }
 

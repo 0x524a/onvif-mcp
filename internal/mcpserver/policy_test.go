@@ -30,7 +30,7 @@ func policyServer(t *testing.T, p func(*registry.Registry) *safety.Policy) *mcp.
 		"cam-a":     {ID: "cam-a", Endpoint: cam.Endpoint(), Username: cam.Username(), Password: cam.Password(), Control: true},
 		"cam-fixed": {ID: "cam-fixed", Endpoint: cam.Endpoint(), Username: cam.Username(), Password: cam.Password()},
 	}})
-	return connect(t, New(reg, quietLog(), p(reg)))
+	return connect(t, newOp(reg, quietLog(), p(reg)))
 }
 
 func readPolicy(t *testing.T, cs *mcp.ClientSession) map[string]any {

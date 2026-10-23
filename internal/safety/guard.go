@@ -1,6 +1,7 @@
 package safety
 
 import (
+	"context"
 	"log/slog"
 	"math"
 	"sort"
@@ -20,6 +21,14 @@ const (
 	ReasonRateLimited      = "rate_limited"
 	ReasonNoRateLimiter    = "no_rate_limiter"
 	ReasonInvalidArguments = "invalid_arguments"
+	// ReasonCallerUnidentified: the call carried no valid Caller. The guard
+	// fails closed on it; no transport may reach a write or halt tool without
+	// establishing one.
+	ReasonCallerUnidentified = "caller_unidentified"
+	// ReasonCallerNotGranted: a valid Caller without control (every remote
+	// caller). The agent-facing text is identical to ReasonCallerUnidentified;
+	// only the audit line tells them apart.
+	ReasonCallerNotGranted = "caller_not_granted"
 )
 
 // CameraLookup resolves a camera id to its registry entry. *registry.Registry
@@ -49,6 +58,12 @@ type Policy struct {
 	// which carries JSON-RPC. Nil refuses all real moves: no motion without a
 	// record of it.
 	Log *slog.Logger
+
+	// WritesUnavailable, when non-empty, says this transport offers no write
+	// tool at all (HTTP in v0.2.0). The policy resource then reports read-only,
+	// an empty gated list and this text as how_to_enable, so it neither
+	// advises --enable-control nor names tools the caller can never use.
+	WritesUnavailable string
 
 	// gated is the set of write tools the guarded registration helper has
 	// been asked to register, whether or not control is enabled. The policy
@@ -130,6 +145,8 @@ type PolicyOptions struct {
 	// main leaves them zero, so the defaults are what operators get.
 	Interval time.Duration
 	Burst    int
+	// WritesUnavailable: see Policy.WritesUnavailable.
+	WritesUnavailable string
 	// Clock overrides the limiter's time source; nil means time.Now.
 	Clock func() time.Time
 	// Log is the audit logger. Nil leaves the policy unable to approve real
@@ -144,6 +161,8 @@ func NewPolicy(opts PolicyOptions) *Policy {
 		Cameras:        opts.Cameras,
 		Limiter:        NewLimiter(opts.Interval, opts.Burst, WithClock(opts.Clock)),
 		Log:            opts.Log,
+
+		WritesUnavailable: opts.WritesUnavailable,
 	}
 }
 
@@ -167,12 +186,21 @@ func (p *Policy) WriteRegistered() bool { return p != nil && p.ControlEnabled }
 
 // Evaluate applies the gates in order:
 //
-//  1. the camera is configured (an unknown id never reaches anything else)
-//  2. control is enabled for the process and granted to this camera
-//  3. a dry run stops here: it moves nothing, so it consumes no rate budget
-//  4. the audit log and rate limiter exist, and the camera's device has budget
-//     (the budget is per device, keyed by the normalised endpoint, so two ids
-//     for one device share it)
+//  1. the call carries a valid Caller with control (safety.CallerFrom); none, or
+//     one without control, is refused before the camera id is even looked up,
+//     so a caller without control gets one answer whatever camera it names
+//  2. the camera is configured (an unknown id never reaches anything else)
+//  3. control is enabled for the process
+//  4. control is granted to this camera
+//  5. a dry run stops here: it moves nothing, so it consumes no rate budget
+//  6. the audit log exists
+//  7. the rate limiter exists and the camera's device has budget (the budget is
+//     per device, keyed by the normalised endpoint, so two ids for one device
+//     share it)
+//
+// There is no permissive default: a context without a Caller is refused.
+// Stdio supplies safety.StdioOperator() explicitly; a network transport can
+// only build a Caller without control (safety.RemoteCaller).
 //
 // The process-level registration gate is applied earlier, at registration.
 // Every refusal is audited here, so no tool can forget to record one. Allowed
@@ -180,13 +208,17 @@ func (p *Policy) WriteRegistered() bool { return p != nil && p.ControlEnabled }
 //
 // camera is agent input. Only ids of configured cameras ever reach the
 // limiter, so its memory is bounded by the config, not by the agent.
-func (p *Policy) Evaluate(camera, tool string, dryRun bool) Decision {
+func (p *Policy) Evaluate(ctx context.Context, camera, tool string, dryRun bool) Decision {
 	if p == nil {
 		return Decision{DryRun: dryRun, Blocked: blocked(clean(camera, maxErrCamera), tool,
 			"write policy is not configured", nil)}
 	}
 	refuse := func(te *mcperr.ToolError, reason string) Decision {
 		p.auditBlocked(tool, camera, dryRun, reason)
+		return Decision{DryRun: dryRun, Blocked: te}
+	}
+	if te, reason, who := callerGate(ctx, camera, tool); te != nil {
+		p.auditBlocked(tool, camera, dryRun, reason, "caller", who)
 		return Decision{DryRun: dryRun, Blocked: te}
 	}
 
@@ -247,17 +279,22 @@ func (p *Policy) Evaluate(camera, tool string, dryRun bool) Decision {
 }
 
 // EvaluateHalt is Evaluate for a RiskHalt tool. It applies only the gates that
-// still make sense for a stop: the camera is configured, control is enabled and
-// the camera is granted (the server can only have moved a granted camera). It
+// still make sense for a stop: the caller has control (same gate, same first
+// position and same answer as Evaluate), the camera is configured, control is
+// enabled and the camera is granted (the server can only have moved a granted camera). It
 // never consults the limiter, never requires the audit log and has no dry run,
 // so no budget, missing logger or full key table can stand between an agent and
 // a stop. Refusals are audited, like Evaluate's. A nil Policy refuses.
-func (p *Policy) EvaluateHalt(camera, tool string) Decision {
+func (p *Policy) EvaluateHalt(ctx context.Context, camera, tool string) Decision {
 	if p == nil {
 		return Decision{Blocked: blocked(clean(camera, maxErrCamera), tool, "write policy is not configured", nil)}
 	}
 	refuse := func(te *mcperr.ToolError, reason string) Decision {
 		p.auditBlocked(tool, camera, false, reason)
+		return Decision{Blocked: te}
+	}
+	if te, reason, who := callerGate(ctx, camera, tool); te != nil {
+		p.auditBlocked(tool, camera, false, reason, "caller", who)
 		return Decision{Blocked: te}
 	}
 	var entry *registry.Entry
@@ -288,6 +325,24 @@ func (p *Policy) EvaluateHalt(camera, tool string) Decision {
 			ReasonCameraNotGranted)
 	}
 	return Decision{}
+}
+
+// callerGate is gate 1 of Evaluate and EvaluateHalt. It returns a refusal, the
+// audit reason and the caller id for the audit line ("-" when there is none).
+// The agent-facing text does not depend on the camera or on which of the two
+// reasons applied, so it is not an oracle for camera ids, grants or caller state.
+func callerGate(ctx context.Context, camera, tool string) (*mcperr.ToolError, string, string) {
+	c, ok := CallerFrom(ctx)
+	if ok && c.Control() {
+		return nil, "", ""
+	}
+	reason, who := ReasonCallerUnidentified, "-"
+	if ok {
+		reason, who = ReasonCallerNotGranted, c.ID()
+	}
+	return blocked(clean(camera, maxErrCamera), tool,
+		"state-changing tools are not available to this caller", nil,
+		"this caller cannot use write tools on this server; do not retry"), reason, who
 }
 
 // misconfiguredHint is for the fail-closed refusals that only a broken server

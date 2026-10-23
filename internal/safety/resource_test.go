@@ -257,3 +257,39 @@ func TestPolicyResourceNamesHaltToolsAndSaysTheyHaveNoDryRunOrRateLimit(t *testi
 		t.Errorf("no halt tool, yet the policy talks about one: %s", raw)
 	}
 }
+
+const writesUnavailableText = "write tools are not offered on this transport"
+
+func TestPolicyResourceWithWritesUnavailable(t *testing.T) {
+	// A policy whose control flag is (wrongly) on must still report read-only
+	// when the transport offers no write tool, and must not advise --enable-control.
+	p, _, _ := newPolicy(true)
+	p.NoteGated("ptz.goto_preset")
+	p.NoteHalt("ptz.stop")
+	p.WritesUnavailable = writesUnavailableText
+	b, raw := readPolicyWith(t, p, []CameraGrant{{ID: "cam-a", ControlAllowed: true}, {ID: "cam-b"}})
+	if b.Mode != "read-only" || b.ControlEnabled {
+		t.Errorf("mode=%q control_enabled=%v", b.Mode, b.ControlEnabled)
+	}
+	if len(b.GatedWriteTools) != 0 {
+		t.Errorf("gated_write_tools must be empty, got %v", b.GatedWriteTools)
+	}
+	if b.HowToEnable != writesUnavailableText {
+		t.Errorf("how_to_enable = %q", b.HowToEnable)
+	}
+	for _, c := range b.Cameras {
+		if c.Writable {
+			t.Errorf("camera %s reported writable", c.ID)
+		}
+	}
+	for _, bad := range []string{"--enable-control", "ptz.goto_preset", "ptz.stop", "ptz.move_relative"} {
+		if strings.Contains(raw, bad) {
+			t.Errorf("document mentions %q: %s", bad, raw)
+		}
+	}
+	// Identical for every caller: the resource is a pure function of the policy.
+	_, raw2 := readPolicyWith(t, p, []CameraGrant{{ID: "cam-a", ControlAllowed: true}, {ID: "cam-b"}})
+	if raw != raw2 {
+		t.Error("document differs between reads")
+	}
+}

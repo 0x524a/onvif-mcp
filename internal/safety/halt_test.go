@@ -52,7 +52,7 @@ func TestEvaluateHaltAllowsWithoutLogLimiterOrBudget(t *testing.T) {
 	p.Log = nil
 	p.Limiter = nil
 	for i := 0; i < 50; i++ {
-		d := p.EvaluateHalt("cam-a", haltTool)
+		d := p.EvaluateHalt(opCtx(), "cam-a", haltTool)
 		if d.Blocked != nil {
 			t.Fatalf("call %d refused: %+v", i, d.Blocked)
 		}
@@ -64,14 +64,14 @@ func TestEvaluateHaltAllowsWithoutLogLimiterOrBudget(t *testing.T) {
 
 func TestEvaluateHaltIsNotRateLimitedWhenTheBucketIsExhausted(t *testing.T) {
 	p, _, _ := newPolicy(true)
-	if d := p.Evaluate("cam-a", tool, false); d.Blocked != nil {
+	if d := p.Evaluate(opCtx(), "cam-a", tool, false); d.Blocked != nil {
 		t.Fatal(d.Blocked)
 	}
-	if d := p.Evaluate("cam-a", tool, false); d.Blocked == nil {
+	if d := p.Evaluate(opCtx(), "cam-a", tool, false); d.Blocked == nil {
 		t.Fatal("harness: the bucket should be exhausted")
 	}
 	for i := 0; i < 50; i++ {
-		if d := p.EvaluateHalt("cam-a", haltTool); d.Blocked != nil {
+		if d := p.EvaluateHalt(opCtx(), "cam-a", haltTool); d.Blocked != nil {
 			t.Fatalf("halt refused after the bucket emptied: %+v", d.Blocked)
 		}
 	}
@@ -92,7 +92,7 @@ func TestEvaluateHaltRefusesAndAuditsEveryApplicableGate(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			p, buf, _ := newPolicy(c.control)
-			d := p.EvaluateHalt(c.camera, haltTool)
+			d := p.EvaluateHalt(opCtx(), c.camera, haltTool)
 			if d.Blocked == nil || d.Blocked.Code != c.code {
 				t.Fatalf("got %+v, want %s", d.Blocked, c.code)
 			}
@@ -106,7 +106,7 @@ func TestEvaluateHaltRefusesAndAuditsEveryApplicableGate(t *testing.T) {
 
 func TestEvaluateHaltOnNilPolicyRefuses(t *testing.T) {
 	var p *Policy
-	if d := p.EvaluateHalt("cam-a", haltTool); d.Blocked == nil {
+	if d := p.EvaluateHalt(opCtx(), "cam-a", haltTool); d.Blocked == nil {
 		t.Fatal("a nil policy must refuse")
 	}
 }
@@ -114,7 +114,7 @@ func TestEvaluateHaltOnNilPolicyRefuses(t *testing.T) {
 func TestEvaluateHaltUnknownCamerasNeverReachTheLimiter(t *testing.T) {
 	p, _, _ := newPolicy(true)
 	for i := 0; i < 100; i++ {
-		p.EvaluateHalt(fmt.Sprintf("attacker-%d", i), haltTool)
+		p.EvaluateHalt(opCtx(), fmt.Sprintf("attacker-%d", i), haltTool)
 	}
 	if p.Limiter.size() != 0 {
 		t.Error("a halt must not touch the limiter")

@@ -141,7 +141,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 
 	// ctx is also the base context of every tool call, so a signal aborts
 	// in-flight camera I/O instead of waiting for it to time out.
-	srv := mcpserver.New(reg, log, policy, mcpserver.WithBaseContext(ctx), mcpserver.WithSnapshotMaxBytes(*snapshotMax))
+	srv := mcpserver.New(reg, log, policy, mcpserver.WithBaseContext(ctx), mcpserver.WithSnapshotMaxBytes(*snapshotMax),
+		// Stdio is the one transport whose caller is the operator, with control.
+		mcpserver.WithCallerSource(mcpserver.StdioOperator()))
 	tr := stdio.NewTransport(stdin, stdout, stdio.MaxLineBytes, log)
 	err = srv.Run(ctx, tr)
 	if err != nil && !errors.Is(err, context.Canceled) && !isStdinClosed(err) {

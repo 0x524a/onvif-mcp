@@ -75,7 +75,7 @@ func newPolicy(controlEnabled bool) (*Policy, *syncBuf, *fakeClock) {
 func TestUnknownCameraIsRefusedBeforeTheLimiter(t *testing.T) {
 	p, _, _ := newPolicy(true)
 	for i := 0; i < 200; i++ {
-		d := p.Evaluate(fmt.Sprintf("attacker-%d", i), tool, false)
+		d := p.Evaluate(opCtx(), fmt.Sprintf("attacker-%d", i), tool, false)
 		if d.Blocked == nil || d.Blocked.Code != mcperr.CodeNotFound {
 			t.Fatalf("unknown camera must be not_found, got %+v", d.Blocked)
 		}
@@ -87,9 +87,9 @@ func TestUnknownCameraIsRefusedBeforeTheLimiter(t *testing.T) {
 
 func TestLimiterOnlyEverSeesConfiguredCameras(t *testing.T) {
 	p, _, _ := newPolicy(true)
-	p.Evaluate("cam-a", tool, false)
-	p.Evaluate("nope", tool, false)
-	p.Evaluate("cam-fixed", tool, false) // known but not granted: also never reaches the limiter
+	p.Evaluate(opCtx(), "cam-a", tool, false)
+	p.Evaluate(opCtx(), "nope", tool, false)
+	p.Evaluate(opCtx(), "cam-fixed", tool, false) // known but not granted: also never reaches the limiter
 	if got := p.Limiter.size(); got != 1 {
 		t.Errorf("limiter tracks %d keys, want 1 (cam-a only)", got)
 	}
@@ -97,7 +97,7 @@ func TestLimiterOnlyEverSeesConfiguredCameras(t *testing.T) {
 
 func TestCameraWithoutGrantIsBlocked(t *testing.T) {
 	p, _, _ := newPolicy(true)
-	d := p.Evaluate("cam-fixed", tool, false)
+	d := p.Evaluate(opCtx(), "cam-fixed", tool, false)
 	if d.Blocked == nil {
 		t.Fatal("a camera that did not opt in must be blocked")
 	}
@@ -112,7 +112,7 @@ func TestCameraWithoutGrantIsBlocked(t *testing.T) {
 func TestGrantComesFromTheRegistryNotTheCaller(t *testing.T) {
 	// Evaluate has no controlAllowed parameter: a tool cannot assert a grant.
 	p, _, _ := newPolicy(true)
-	if d := p.Evaluate("cam-a", tool, false); d.Blocked != nil {
+	if d := p.Evaluate(opCtx(), "cam-a", tool, false); d.Blocked != nil {
 		t.Fatalf("granted camera was blocked: %+v", d.Blocked)
 	}
 }
@@ -120,7 +120,7 @@ func TestGrantComesFromTheRegistryNotTheCaller(t *testing.T) {
 func TestGrantBeatsDryRunOrdering(t *testing.T) {
 	// Even a dry run must not reveal anything for a camera that did not opt in.
 	p, _, _ := newPolicy(true)
-	if d := p.Evaluate("cam-fixed", tool, true); d.Blocked == nil {
+	if d := p.Evaluate(opCtx(), "cam-fixed", tool, true); d.Blocked == nil {
 		t.Error("a dry run against a non-granted camera must still be blocked")
 	}
 }
@@ -128,7 +128,7 @@ func TestGrantBeatsDryRunOrdering(t *testing.T) {
 func TestControlDisabledBlocksEverythingDefenceInDepth(t *testing.T) {
 	p, _, _ := newPolicy(false)
 	for _, dry := range []bool{true, false} {
-		d := p.Evaluate("cam-a", tool, dry)
+		d := p.Evaluate(opCtx(), "cam-a", tool, dry)
 		if d.Blocked == nil || d.Blocked.Code != mcperr.CodeBlockedByPolicy {
 			t.Errorf("dry=%v: control disabled must block, got %+v", dry, d.Blocked)
 		}
@@ -139,7 +139,7 @@ func TestDryRunSkipsTheRateLimiter(t *testing.T) {
 	// A dry run touches no motor, so it must not consume a token.
 	p, _, _ := newPolicy(true)
 	for i := 0; i < 5; i++ {
-		d := p.Evaluate("cam-a", tool, true)
+		d := p.Evaluate(opCtx(), "cam-a", tool, true)
 		if d.Blocked != nil {
 			t.Fatalf("dry run %d was blocked: %+v", i, d.Blocked)
 		}
@@ -147,17 +147,17 @@ func TestDryRunSkipsTheRateLimiter(t *testing.T) {
 			t.Error("decision must carry DryRun")
 		}
 	}
-	if d := p.Evaluate("cam-a", tool, false); d.Blocked != nil {
+	if d := p.Evaluate(opCtx(), "cam-a", tool, false); d.Blocked != nil {
 		t.Error("dry runs must not have exhausted the real budget")
 	}
 }
 
 func TestRateLimitBlocksWithRetryAfter(t *testing.T) {
 	p, _, _ := newPolicy(true)
-	if d := p.Evaluate("cam-a", tool, false); d.Blocked != nil || d.DryRun {
+	if d := p.Evaluate(opCtx(), "cam-a", tool, false); d.Blocked != nil || d.DryRun {
 		t.Fatalf("first real move must proceed: %+v", d)
 	}
-	d := p.Evaluate("cam-a", tool, false)
+	d := p.Evaluate(opCtx(), "cam-a", tool, false)
 	if d.Blocked == nil {
 		t.Fatal("second real move must be rate limited")
 	}
@@ -171,17 +171,17 @@ func TestRateLimitBlocksWithRetryAfter(t *testing.T) {
 
 func TestRateLimitRecoversAfterInterval(t *testing.T) {
 	p, _, clk := newPolicy(true)
-	p.Evaluate("cam-a", tool, false)
+	p.Evaluate(opCtx(), "cam-a", tool, false)
 	clk.Advance(time.Hour)
-	if d := p.Evaluate("cam-a", tool, false); d.Blocked != nil {
+	if d := p.Evaluate(opCtx(), "cam-a", tool, false); d.Blocked != nil {
 		t.Errorf("must proceed after the interval: %+v", d.Blocked)
 	}
 }
 
 func TestRateLimitIsPerCameraThroughPolicy(t *testing.T) {
 	p, _, _ := newPolicy(true)
-	p.Evaluate("cam-a", tool, false)
-	if d := p.Evaluate("cam-b", tool, false); d.Blocked != nil {
+	p.Evaluate(opCtx(), "cam-a", tool, false)
+	if d := p.Evaluate(opCtx(), "cam-b", tool, false); d.Blocked != nil {
 		t.Errorf("cam-b throttled by cam-a: %+v", d.Blocked)
 	}
 }
@@ -190,15 +190,15 @@ func TestDefaultsAreTwoSecondsBurstOne(t *testing.T) {
 	clk := newFakeClock()
 	p := NewPolicy(PolicyOptions{ControlEnabled: true, Cameras: testRegistry(), Clock: clk.Now,
 		Log: slog.New(slog.NewJSONHandler(io.Discard, nil))})
-	if d := p.Evaluate("cam-a", tool, false); d.Blocked != nil {
+	if d := p.Evaluate(opCtx(), "cam-a", tool, false); d.Blocked != nil {
 		t.Fatal("first move must proceed")
 	}
-	d := p.Evaluate("cam-a", tool, false)
+	d := p.Evaluate(opCtx(), "cam-a", tool, false)
 	if d.Blocked == nil || *d.Blocked.RetryAfterSeconds != 2 {
 		t.Fatalf("want a 2s retry-after by default, got %+v", d.Blocked)
 	}
 	clk.Advance(2 * time.Second)
-	if d := p.Evaluate("cam-a", tool, false); d.Blocked != nil {
+	if d := p.Evaluate(opCtx(), "cam-a", tool, false); d.Blocked != nil {
 		t.Errorf("one movement per 2s: must proceed after 2s: %+v", d.Blocked)
 	}
 }
@@ -208,11 +208,11 @@ func TestConfiguredIntervalAndBurst(t *testing.T) {
 	p := NewPolicy(PolicyOptions{ControlEnabled: true, Cameras: testRegistry(), Clock: clk.Now,
 		Interval: 10 * time.Second, Burst: 3, Log: slog.New(slog.NewJSONHandler(io.Discard, nil))})
 	for i := 0; i < 3; i++ {
-		if d := p.Evaluate("cam-a", tool, false); d.Blocked != nil {
+		if d := p.Evaluate(opCtx(), "cam-a", tool, false); d.Blocked != nil {
 			t.Fatalf("move %d within burst blocked", i)
 		}
 	}
-	d := p.Evaluate("cam-a", tool, false)
+	d := p.Evaluate(opCtx(), "cam-a", tool, false)
 	if d.Blocked == nil || *d.Blocked.RetryAfterSeconds != 10 {
 		t.Errorf("want 10s retry-after, got %+v", d.Blocked)
 	}
@@ -228,7 +228,7 @@ func TestConcurrentRealMovesGrantExactlyOne(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if p.Evaluate("cam-a", tool, false).Blocked == nil {
+			if p.Evaluate(opCtx(), "cam-a", tool, false).Blocked == nil {
 				ok.Add(1)
 			}
 		}()
@@ -243,10 +243,10 @@ func TestConcurrentRealMovesGrantExactlyOne(t *testing.T) {
 func TestNilLimiterFailsClosedForRealMovesOnly(t *testing.T) {
 	p, _, _ := newPolicy(true)
 	p.Limiter = nil
-	if d := p.Evaluate("cam-a", tool, false); d.Blocked == nil || d.Blocked.Code != mcperr.CodeBlockedByPolicy {
+	if d := p.Evaluate(opCtx(), "cam-a", tool, false); d.Blocked == nil || d.Blocked.Code != mcperr.CodeBlockedByPolicy {
 		t.Errorf("nil limiter must refuse real moves, got %+v", d.Blocked)
 	}
-	if d := p.Evaluate("cam-a", tool, true); d.Blocked != nil {
+	if d := p.Evaluate(opCtx(), "cam-a", tool, true); d.Blocked != nil {
 		t.Errorf("nil limiter must not break dry runs: %+v", d.Blocked)
 	}
 }
@@ -254,17 +254,17 @@ func TestNilLimiterFailsClosedForRealMovesOnly(t *testing.T) {
 func TestNilLogFailsClosedForRealMovesAndDoesNotPanic(t *testing.T) {
 	p, _, _ := newPolicy(true)
 	p.Log = nil
-	if d := p.Evaluate("cam-a", tool, false); d.Blocked == nil {
+	if d := p.Evaluate(opCtx(), "cam-a", tool, false); d.Blocked == nil {
 		t.Error("with no audit log a real move must be refused")
 	}
-	p.Evaluate("nope", tool, true)
+	p.Evaluate(opCtx(), "nope", tool, true)
 	p.Audit(tool, "cam-a", false, true, "ok")
 }
 
 func TestZeroValuePolicyFailsClosedWithoutPanic(t *testing.T) {
 	var p Policy
 	for _, dry := range []bool{true, false} {
-		if d := p.Evaluate("cam-a", tool, dry); d.Blocked == nil {
+		if d := p.Evaluate(opCtx(), "cam-a", tool, dry); d.Blocked == nil {
 			t.Errorf("zero Policy must block (dry=%v)", dry)
 		}
 	}
@@ -276,7 +276,7 @@ func TestZeroValuePolicyFailsClosedWithoutPanic(t *testing.T) {
 
 func TestNilPolicyFailsClosedWithoutPanic(t *testing.T) {
 	var p *Policy
-	if d := p.Evaluate("cam-a", tool, true); d.Blocked == nil {
+	if d := p.Evaluate(opCtx(), "cam-a", tool, true); d.Blocked == nil {
 		t.Error("nil Policy must block")
 	}
 	if p.WriteRegistered() {
@@ -288,7 +288,7 @@ func TestNilPolicyFailsClosedWithoutPanic(t *testing.T) {
 func TestNilCamerasBlocksEverything(t *testing.T) {
 	p, _, _ := newPolicy(true)
 	p.Cameras = nil
-	if d := p.Evaluate("cam-a", tool, true); d.Blocked == nil {
+	if d := p.Evaluate(opCtx(), "cam-a", tool, true); d.Blocked == nil {
 		t.Error("no camera source means no camera is known")
 	}
 }
@@ -317,7 +317,7 @@ func TestBlockedAttemptsAreAuditedByTheGuard(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			p, buf, _ := newPolicy(c.enable)
-			p.Evaluate(c.cam, tool, c.dry)
+			p.Evaluate(opCtx(), c.cam, tool, c.dry)
 			recs := buf.records(t)
 			if len(recs) != 1 {
 				t.Fatalf("want exactly 1 audit line, got %d", len(recs))
@@ -335,8 +335,8 @@ func TestBlockedAttemptsAreAuditedByTheGuard(t *testing.T) {
 
 func TestRateLimitedAttemptIsAudited(t *testing.T) {
 	p, buf, _ := newPolicy(true)
-	p.Evaluate("cam-a", tool, false)
-	p.Evaluate("cam-a", tool, false)
+	p.Evaluate(opCtx(), "cam-a", tool, false)
+	p.Evaluate(opCtx(), "cam-a", tool, false)
 	recs := buf.records(t)
 	if len(recs) != 1 { // the allowed call is audited by the tool, not the guard
 		t.Fatalf("want 1 line (the blocked one), got %d: %v", len(recs), recs)
@@ -362,7 +362,7 @@ func TestAuditRecordsOutcomeFields(t *testing.T) {
 func TestAuditHasNoArgumentOrSecretFields(t *testing.T) {
 	p, buf, _ := newPolicy(true)
 	p.Audit(tool, "cam-a", false, true, "ok")
-	p.Evaluate("nope", tool, false)
+	p.Evaluate(opCtx(), "nope", tool, false)
 	allowed := map[string]bool{"time": true, "level": true, "msg": true, "tool": true, "camera": true,
 		"control_enabled": true, "dry_run": true, "executed": true, "outcome": true, "blocked": true, "reason": true,
 		"camera_granted": true, "target": true}
@@ -377,7 +377,7 @@ func TestAuditHasNoArgumentOrSecretFields(t *testing.T) {
 
 func TestAuditScrubsAndBoundsAgentControlledText(t *testing.T) {
 	p, buf, _ := newPolicy(true)
-	p.Evaluate("http://admin:hunter2@evil/"+strings.Repeat("x", 5000), tool, false)
+	p.Evaluate(opCtx(), "http://admin:hunter2@evil/"+strings.Repeat("x", 5000), tool, false)
 	p.Audit(tool, "cam-a", false, false, "failed: http://admin:hunter2@192.0.2.1/x "+strings.Repeat("y", 5000))
 	for _, r := range buf.records(t) {
 		for k, v := range r {
@@ -394,7 +394,7 @@ func TestAuditScrubsAndBoundsAgentControlledText(t *testing.T) {
 
 func TestAuditNeutralisesLogInjection(t *testing.T) {
 	p, buf, _ := newPolicy(true)
-	p.Evaluate("cam\n{\"msg\":\"forged\"}", tool, false)
+	p.Evaluate(opCtx(), "cam\n{\"msg\":\"forged\"}", tool, false)
 	if n := len(buf.records(t)); n != 1 {
 		t.Errorf("a newline in the camera id forged %d log lines, want 1", n)
 	}
@@ -418,7 +418,7 @@ func TestHugeCameraIDIsBoundedBeforeScrubbing(t *testing.T) {
 	p, buf, _ := newPolicy(true)
 	for name, pol := range map[string]*Policy{"unknown camera": p, "nil policy": nil} {
 		t0 := time.Now()
-		d := pol.Evaluate(big, tool, false)
+		d := pol.Evaluate(opCtx(), big, tool, false)
 		if el := time.Since(t0); el > 500*time.Millisecond {
 			t.Errorf("%s: Evaluate took %v", name, el)
 		}
@@ -447,7 +447,7 @@ func TestAuditRecordsWhetherTheCameraWasGranted(t *testing.T) {
 	p.Audit(tool, "cam-a", false, true, "ok")
 	p.Audit(tool, "cam-fixed", true, false, "dry_run")
 	p.Audit(tool, "nope", true, false, "dry_run")
-	p.Evaluate("cam-fixed", tool, false) // refused: not granted
+	p.Evaluate(opCtx(), "cam-fixed", tool, false) // refused: not granted
 	recs := buf.records(t)
 	want := []bool{true, false, false, false}
 	for i, r := range recs {
@@ -521,7 +521,7 @@ func TestAttemptTrackerSeesHandlerReach(t *testing.T) {
 func TestFailClosedRefusalsTellTheAgentItIsAServerProblem(t *testing.T) {
 	p, _, _ := newPolicy(true)
 	p.Log = nil
-	d := p.Evaluate("cam-a", tool, false)
+	d := p.Evaluate(opCtx(), "cam-a", tool, false)
 	check := func(name string, d Decision) {
 		t.Helper()
 		if d.Blocked == nil || d.Blocked.Code != mcperr.CodeBlockedByPolicy || d.Blocked.Retryable {
@@ -536,7 +536,7 @@ func TestFailClosedRefusalsTellTheAgentItIsAServerProblem(t *testing.T) {
 	check("no audit log", d)
 	p, _, _ = newPolicy(true)
 	p.Limiter = nil
-	check("no limiter", p.Evaluate("cam-a", tool, false))
+	check("no limiter", p.Evaluate(opCtx(), "cam-a", tool, false))
 }
 
 func sharedEndpointPolicy() *Policy {
@@ -552,14 +552,14 @@ func sharedEndpointPolicy() *Policy {
 // Two ids that address one device share one rate budget.
 func TestTwoIDsOnOneDeviceShareOneBudget(t *testing.T) {
 	p := sharedEndpointPolicy()
-	if d := p.Evaluate("a", tool, false); d.Blocked != nil {
+	if d := p.Evaluate(opCtx(), "a", tool, false); d.Blocked != nil {
 		t.Fatalf("first call blocked: %+v", d.Blocked)
 	}
-	d := p.Evaluate("b", tool, false)
+	d := p.Evaluate(opCtx(), "b", tool, false)
 	if d.Blocked == nil || d.Blocked.RetryAfterSeconds == nil {
 		t.Fatalf("second id on the same device was not rate limited: %+v", d)
 	}
-	if d := p.Evaluate("c", tool, false); d.Blocked != nil {
+	if d := p.Evaluate(opCtx(), "c", tool, false); d.Blocked != nil {
 		t.Errorf("a different device was throttled: %+v", d.Blocked)
 	}
 }
@@ -568,23 +568,23 @@ func TestTwoIDsOnOneDeviceShareOneBudget(t *testing.T) {
 // the other id sees it.
 func TestRefundReturnsTheDevicesBudget(t *testing.T) {
 	p := sharedEndpointPolicy()
-	d := p.Evaluate("a", tool, false)
+	d := p.Evaluate(opCtx(), "a", tool, false)
 	if d.Blocked != nil || d.Refund == nil {
 		t.Fatalf("decision = %+v, want an allowed real call with a Refund", d)
 	}
 	d.Refund()
-	if d2 := p.Evaluate("b", tool, false); d2.Blocked != nil {
+	if d2 := p.Evaluate(opCtx(), "b", tool, false); d2.Blocked != nil {
 		t.Errorf("budget not returned: %+v", d2.Blocked)
 	}
 }
 
 func TestDryRunAndRefusalCarryNoRefund(t *testing.T) {
 	p := sharedEndpointPolicy()
-	if d := p.Evaluate("a", tool, true); d.Refund != nil {
+	if d := p.Evaluate(opCtx(), "a", tool, true); d.Refund != nil {
 		t.Error("a dry run consumed nothing, so it has nothing to refund")
 	}
-	p.Evaluate("a", tool, false)
-	if d := p.Evaluate("a", tool, false); d.Blocked == nil || d.Refund != nil {
+	p.Evaluate(opCtx(), "a", tool, false)
+	if d := p.Evaluate(opCtx(), "a", tool, false); d.Blocked == nil || d.Refund != nil {
 		t.Errorf("refusal = %+v", d)
 	}
 }

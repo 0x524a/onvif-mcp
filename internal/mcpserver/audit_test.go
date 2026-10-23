@@ -70,7 +70,7 @@ func auditServer(t *testing.T) (*mcp.ClientSession, *lockedBuf) {
 	policy := safety.NewPolicy(safety.PolicyOptions{
 		ControlEnabled: true, Cameras: reg, Log: slog.New(slog.NewJSONHandler(buf, nil)),
 	})
-	srv := New(reg, quietLog(), policy)
+	srv := newOp(reg, quietLog(), policy)
 	h := func(context.Context, *mcp.CallToolRequest, auditIn) (*mcp.CallToolResult, mcperr.Out[auditOut], error) {
 		return nil, mcperr.OK(auditOut{Note: "x"}), nil
 	}

@@ -104,11 +104,11 @@ func (p *Policy) Audit(tool, camera string, dryRun, executed bool, outcome strin
 }
 
 // auditBlocked records a refusal. reason is one of the Reason constants.
-func (p *Policy) auditBlocked(tool, camera string, dryRun bool, reason string) {
+func (p *Policy) auditBlocked(tool, camera string, dryRun bool, reason string, extra ...any) {
 	if p == nil || p.Log == nil {
 		return
 	}
-	p.Log.Warn("write attempt blocked",
+	p.Log.Warn("write attempt blocked", append([]any{
 		"tool", clean(tool, maxAuditCamera),
 		"camera", clean(camera, maxAuditCamera),
 		"camera_granted", p.granted(camera),
@@ -118,7 +118,7 @@ func (p *Policy) auditBlocked(tool, camera string, dryRun bool, reason string) {
 		"outcome", "blocked",
 		"blocked", true,
 		"reason", reason,
-	)
+	}, extra...)...)
 }
 
 // AuditRejected records a call to a gated write tool that was refused before

@@ -251,7 +251,7 @@ func guardedHandler[In, Data any](
 			return cancelled[Data](d, tool, camera, shown, dry)
 		}
 
-		dec := d.Policy.Evaluate(camera, tool, dry)
+		dec := d.Policy.Evaluate(ctx, camera, tool, dry)
 		if dec.Blocked != nil {
 			return fail[Data](dec.Blocked)
 		}
@@ -356,7 +356,7 @@ func haltHandler[In, Data any](
 		camera := hi.CameraID()
 		shown := redact.ScrubBounded(camera, maxEchoedCamera, "...")
 
-		dec := d.Policy.EvaluateHalt(camera, tool)
+		dec := d.Policy.EvaluateHalt(ctx, camera, tool)
 		if dec.Blocked != nil {
 			return fail[Data](dec.Blocked)
 		}

@@ -59,7 +59,7 @@ func newTestServer(t *testing.T, withDead bool) (*mcp.Server, *testcam.Cam) {
 		}
 	}
 	reg := registry.New(cfg)
-	return New(reg, quietLog(), testPolicy(reg, false)), cam
+	return newOp(reg, quietLog(), testPolicy(reg, false)), cam
 }
 
 func findTool(t *testing.T, cs *mcp.ClientSession, name string) *mcp.Tool {
@@ -297,7 +297,7 @@ func TestSummarize(t *testing.T) {
 
 func TestEmptyConfigListsNothing(t *testing.T) {
 	reg := registry.New(&config.Config{})
-	srv := New(reg, quietLog(), testPolicy(reg, false))
+	srv := newOp(reg, quietLog(), testPolicy(reg, false))
 	res := callList(t, connect(t, srv), map[string]any{"probe": true})
 	if res.IsError {
 		t.Fatalf("empty config must not be an error: %+v", res.Content)
@@ -438,7 +438,7 @@ func hungServer(t *testing.T, opts ...Option) *mcp.Server {
 		"hung": {ID: "hung", Endpoint: hangListener(t), Username: "u", Password: "p", TimeoutSeconds: 60},
 	}}
 	reg := registry.New(cfg)
-	return New(reg, quietLog(), testPolicy(reg, false), opts...)
+	return newOp(reg, quietLog(), testPolicy(reg, false), opts...)
 }
 
 func TestBaseContextCancelAbortsInFlightProbe(t *testing.T) {
@@ -671,7 +671,7 @@ func TestStreamInspectIsWiredWithAnInjectedProber(t *testing.T) {
 	}})
 	fake := probe.FakeProber{Result: &probe.Result{Reachable: true, DescribeOK: true, Protocol: "rtsp",
 		Tracks: []probe.Track{{Type: "video", Format: "H264", Width: 640, Height: 480}}}}
-	cs := connect(t, New(reg, quietLog(), testPolicy(reg, false), WithProber(fake)))
+	cs := connect(t, newOp(reg, quietLog(), testPolicy(reg, false), WithProber(fake)))
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
 		Name: "stream.inspect", Arguments: map[string]any{"camera": "cam-a", "profile": cam.ProfileToken()},
 	})
@@ -703,7 +703,7 @@ func TestSnapshotIsWiredWithTheConfiguredCap(t *testing.T) {
 		return res
 	}
 
-	res := callSnap(connect(t, New(reg, quietLog(), testPolicy(reg, false))), args)
+	res := callSnap(connect(t, newOp(reg, quietLog(), testPolicy(reg, false))), args)
 	var img *mcp.ImageContent
 	for _, c := range res.Content {
 		if i, ok := c.(*mcp.ImageContent); ok {
@@ -717,7 +717,7 @@ func TestSnapshotIsWiredWithTheConfiguredCap(t *testing.T) {
 		t.Error("password in output")
 	}
 
-	small := connect(t, New(reg, quietLog(), testPolicy(reg, false), WithSnapshotMaxBytes(2048)))
+	small := connect(t, newOp(reg, quietLog(), testPolicy(reg, false), WithSnapshotMaxBytes(2048)))
 	res = callSnap(small, args)
 	b, _ := json.Marshal(res)
 	if !res.IsError || !strings.Contains(string(b), "over the 2048 byte limit") || !strings.Contains(string(b), "media.profiles") {
