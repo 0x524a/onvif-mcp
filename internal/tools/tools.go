@@ -57,6 +57,9 @@ type Deps struct {
 	snapshotSlots    int
 	snapshotSlotWait time.Duration
 	snapshotHook     func()
+	// clientHook, when set, sees every client the motion tools build. Tests use
+	// it to assert that no client is shared across goroutines.
+	clientHook func(*onvif.Client)
 }
 
 // Scope returns a context cancelled when either ctx or d.Base is done.
