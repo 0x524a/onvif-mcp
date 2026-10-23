@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strings"
 	"testing"
 
@@ -92,8 +93,9 @@ func TestNilPolicyFailsClosedAndStillServesTheResource(t *testing.T) {
 	}
 }
 
-// ptz.goto_preset is the one write tool. With control off an agent cannot see
-// it in tools/list, but the policy resource names it and explains the gate.
+// The gated tools are ptz.goto_preset, ptz.move_relative and ptz.stop. With
+// control off an agent cannot see them in tools/list, but the policy resource
+// names them and explains the gate.
 func TestWriteToolIsHiddenWithControlOffButNamedByThePolicy(t *testing.T) {
 	cs := policyServer(t, func(r *registry.Registry) *safety.Policy { return testPolicy(r, false) })
 	res, err := cs.ListTools(context.Background(), nil)
@@ -110,8 +112,14 @@ func TestWriteToolIsHiddenWithControlOffButNamedByThePolicy(t *testing.T) {
 	}
 	m := readPolicy(t, cs)
 	gated, _ := m["gated_write_tools"].([]any)
-	if len(gated) != 1 || gated[0] != "ptz.goto_preset" {
-		t.Fatalf("gated_write_tools = %v", m["gated_write_tools"])
+	if !anyEqual(gated, gatedTools) {
+		t.Fatalf("gated_write_tools = %v, want %v", m["gated_write_tools"], gatedTools)
+	}
+	if halts, _ := m["halt_tools"].([]any); len(halts) != 1 || halts[0] != "ptz.stop" {
+		t.Errorf("halt_tools = %v", m["halt_tools"])
+	}
+	if ex, _ := m["explanation"].(string); !strings.Contains(ex, "no dry run") || !strings.Contains(ex, "not rate limited") {
+		t.Errorf("the policy must say ptz.stop has no dry run and is not rate limited: %q", ex)
 	}
 	for _, k := range []string{"explanation", "how_to_enable"} {
 		txt, _ := m[k].(string)
@@ -136,11 +144,12 @@ func TestWriteToolIsListedWithControlOnAndWritableCamerasAreReported(t *testing.
 			writes = append(writes, tool.Name)
 		}
 	}
-	if len(writes) != 1 || writes[0] != "ptz.goto_preset" {
-		t.Fatalf("non-read-only tools = %v, want exactly ptz.goto_preset", writes)
+	sort.Strings(writes)
+	if !equal(writes, gatedTools) {
+		t.Fatalf("non-read-only tools = %v, want exactly %v", writes, gatedTools)
 	}
 	m := readPolicy(t, cs)
-	if gated, _ := m["gated_write_tools"].([]any); len(gated) != 1 || gated[0] != "ptz.goto_preset" {
+	if gated, _ := m["gated_write_tools"].([]any); !anyEqual(gated, gatedTools) {
 		t.Errorf("gated_write_tools = %v", m["gated_write_tools"])
 	}
 	writable := map[string]bool{}
@@ -166,4 +175,19 @@ func TestWriteToolRejectsAStringDryRunWithTheEnvelope(t *testing.T) {
 	if !res.IsError || e["code"] != "invalid_argument" {
 		t.Fatalf("result = %+v", res)
 	}
+}
+
+// gatedTools are every tool that needs control: two writes and the halt tool.
+var gatedTools = []string{"ptz.goto_preset", "ptz.move_relative", "ptz.stop"}
+
+func anyEqual(got []any, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }

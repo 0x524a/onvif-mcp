@@ -24,6 +24,9 @@ var readTools = []string{
 	"camera.snapshot", "ptz.status", "ptz.presets", "imaging.settings",
 }
 
+// gatedSurface are the tools a server registers only with control on.
+var gatedSurface = []string{"ptz.goto_preset", "ptz.move_relative", "ptz.stop"}
+
 const writeTool = "ptz.goto_preset"
 
 func listTools(t *testing.T, control bool) []*mcp.Tool {
@@ -64,11 +67,11 @@ func equal(a, b []string) bool {
 	return true
 }
 
-// The counts are exact on purpose: a twelfth tool must force a decision.
-func TestAllElevenToolsListedWhenControlEnabled(t *testing.T) {
+// The counts are exact on purpose: a fourteenth tool must force a decision.
+func TestAllThirteenToolsListedWhenControlEnabled(t *testing.T) {
 	got := names(listTools(t, true))
-	want := sorted(append(append([]string(nil), readTools...), writeTool))
-	if len(got) != 11 || !equal(got, want) {
+	want := sorted(append(append([]string(nil), readTools...), gatedSurface...))
+	if len(got) != 13 || !equal(got, want) {
 		t.Fatalf("control on: tools = %v, want exactly %v", got, want)
 	}
 }
@@ -77,6 +80,50 @@ func TestTenReadToolsListedWhenControlDisabled(t *testing.T) {
 	got := names(listTools(t, false))
 	if len(got) != 10 || !equal(got, sorted(readTools)) {
 		t.Fatalf("control off: tools = %v, want exactly %v", got, sorted(readTools))
+	}
+}
+
+// The control-off surface is exactly the v0.1 read surface: the new motion tools
+// add nothing an agent can see without the operator's opt-in.
+func TestControlOffSurfaceIsUnchangedFromV01AndMotionToolsAreNamedByThePolicy(t *testing.T) {
+	got := names(listTools(t, false))
+	if !equal(got, sorted(readTools)) {
+		t.Fatalf("control-off tools = %v", got)
+	}
+	cs := policyServer(t, func(r *registry.Registry) *safety.Policy { return testPolicy(r, false) })
+	res, err := cs.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: safety.PolicyURI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := res.Contents[0].Text
+	for _, name := range []string{"ptz.move_relative", "ptz.stop"} {
+		if !bytes.Contains([]byte(body), []byte(name)) {
+			t.Errorf("the policy resource must name %s: %s", name, body)
+		}
+	}
+}
+
+func TestMotionToolAnnotationsAreExplicit(t *testing.T) {
+	want := map[string]struct{ destructive, idempotent bool }{
+		"ptz.goto_preset":   {true, true},
+		"ptz.move_relative": {true, false},
+		"ptz.stop":          {false, true},
+	}
+	seen := 0
+	for _, tl := range listTools(t, true) {
+		w, ok := want[tl.Name]
+		if !ok {
+			continue
+		}
+		seen++
+		a := tl.Annotations
+		if a == nil || a.ReadOnlyHint || a.DestructiveHint == nil || *a.DestructiveHint != w.destructive ||
+			a.IdempotentHint != w.idempotent || a.OpenWorldHint == nil || *a.OpenWorldHint || a.Title == "" {
+			t.Errorf("%s annotations = %+v", tl.Name, a)
+		}
+	}
+	if seen != len(want) {
+		t.Errorf("saw %d of %d motion tools", seen, len(want))
 	}
 }
 

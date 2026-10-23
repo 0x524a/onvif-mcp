@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/0x524a/onvif-mcp/internal/config"
 	"github.com/0x524a/onvif-mcp/internal/mcpserver"
@@ -22,10 +24,58 @@ import (
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := notifyWithGrace(context.Background(), shutdownGrace, os.Interrupt, syscall.SIGTERM)
 	code := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
 	stop()
 	os.Exit(code)
+}
+
+// shutdownGrace is how long after the first SIGINT/SIGTERM a further signal is
+// held instead of terminating the process. Inside it a stop that was already
+// dispatched (ptz.stop) or a relative move in flight is not aborted by an
+// impatient double signal; after it, default signal handling is restored, so a
+// further signal ends a shutdown that is stuck.
+const shutdownGrace = 5 * time.Second
+
+// notifyWithGrace is signal.NotifyContext with that grace rule. The returned
+// context is cancelled by the first signal in sigs. Further signals within grace
+// are consumed and ignored. When grace has passed, default handling is restored
+// (signal.Reset), so the next signal terminates the process. The returned stop
+// function releases the handler and cancels the context.
+//
+// signal.NotifyContext cannot do this: its stop runs only after run returns, so a
+// second signal during shutdown is swallowed for as long as shutdown takes.
+func notifyWithGrace(parent context.Context, grace time.Duration, sigs ...os.Signal) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	ch := make(chan os.Signal, 4)
+	signal.Notify(ch, sigs...)
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		defer signal.Stop(ch)
+		select {
+		case <-ch:
+		case <-done:
+			return
+		}
+		cancel()
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ch: // held: a stop in flight must not be aborted
+			case <-timer.C:
+				signal.Reset(sigs...)
+				return
+			case <-done:
+				return
+			}
+		}
+	}()
+	return ctx, func() {
+		once.Do(func() { close(done) })
+		cancel()
+	}
 }
 
 // run is main without the process-level side effects. Exit codes: 0 clean,

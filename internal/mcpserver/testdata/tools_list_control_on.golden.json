@@ -1328,6 +1328,208 @@
   },
   {
     "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Nudge PTZ camera"
+    },
+    "description": "Use this to nudge a PTZ camera by a small relative amount. Call media.profiles first for a profile with has_ptz true. Pass pan, tilt and/or zoom, each a number sent in the ONVIF generic translation space whose magnitude is at most 0.25 per call; larger values are refused, not clamped, and at least one must be non-zero. What a value means physically, and which way a positive value moves the camera, is defined by the camera: after a small move check ptz.status or camera.snapshot. The camera's own speed applies and may be its maximum. This tool physically moves the camera and is a dry run by default: with dry_run omitted or true it validates the request and reports the exact numbers and space it would send, and moves nothing. Pass dry_run false to actually move. A real move is rate limited per camera (the limit is shared with ptz.goto_preset), only works on cameras the operator opted in to control, and is never retried. The call returns when the camera answers the command, which does not mean it has finished moving: call ptz.status to see where it is, and ptz.stop to stop it. If a real call times out or faults after the command was sent, the camera may or may not have moved: check ptz.status before trying again. A camera that ignores the requested space is not detected by this server. Does not do continuous or absolute moves.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "camera": {
+          "description": "the camera id from camera.list",
+          "type": "string"
+        },
+        "dry_run": {
+          "description": "defaults to true; pass false to actually move the camera",
+          "type": [
+            "null",
+            "boolean"
+          ]
+        },
+        "pan": {
+          "description": "pan translation in the ONVIF generic translation space; magnitude at most 0.25 per call, larger values are refused, not clamped; which way a positive value moves the camera is defined by the camera; omit for no pan",
+          "type": [
+            "null",
+            "number"
+          ]
+        },
+        "profile": {
+          "description": "the token of a media profile with has_ptz true; call media.profiles first to get it",
+          "minLength": 1,
+          "type": "string"
+        },
+        "tilt": {
+          "description": "tilt translation in the ONVIF generic translation space; magnitude at most 0.25 per call, larger values are refused, not clamped; which way a positive value moves the camera is defined by the camera; omit for no tilt",
+          "type": [
+            "null",
+            "number"
+          ]
+        },
+        "zoom": {
+          "description": "zoom translation in the ONVIF generic translation space; magnitude at most 0.25 per call, larger values are refused, not clamped; what a positive value does is defined by the camera; omit for no zoom",
+          "type": [
+            "null",
+            "number"
+          ]
+        }
+      },
+      "required": [
+        "camera",
+        "profile"
+      ],
+      "type": "object"
+    },
+    "name": "ptz.move_relative",
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "description": "the result; present only when the call succeeded",
+          "properties": {
+            "dry_run": {
+              "description": "true when this call only checked the move and sent nothing",
+              "type": "boolean"
+            },
+            "executed": {
+              "description": "true only when the move command was sent to the camera; false for a dry run",
+              "type": "boolean"
+            },
+            "mode": {
+              "description": "always relative",
+              "type": "string"
+            },
+            "note": {
+              "description": "what happened and what to do next",
+              "type": "string"
+            },
+            "profile": {
+              "description": "the profile token the call addressed",
+              "type": "string"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "description": "the exact numbers sent (or that a real call would send); an omitted pan or tilt next to a sent one is 0",
+              "properties": {
+                "pan": {
+                  "description": "pan value sent; absent means no pan was sent",
+                  "type": [
+                    "null",
+                    "number"
+                  ]
+                },
+                "tilt": {
+                  "description": "tilt value sent; absent means no tilt was sent",
+                  "type": [
+                    "null",
+                    "number"
+                  ]
+                },
+                "zoom": {
+                  "description": "zoom value sent; absent means no zoom was sent",
+                  "type": [
+                    "null",
+                    "number"
+                  ]
+                }
+              },
+              "type": "object"
+            },
+            "space_sent": {
+              "description": "the ONVIF generic translation space URIs the command carries, so the unit is visible",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "executed",
+            "dry_run",
+            "profile",
+            "requested",
+            "space_sent",
+            "note"
+          ],
+          "type": [
+            "null",
+            "object"
+          ]
+        },
+        "error": {
+          "additionalProperties": false,
+          "description": "present only when the call failed; the result is then also flagged isError",
+          "properties": {
+            "camera": {
+              "description": "the camera id the call addressed; absent when no camera was involved",
+              "type": "string"
+            },
+            "code": {
+              "description": "failure class, one of: unreachable, timeout, auth_failed, not_supported, not_found, invalid_argument, device_fault, blocked_by_policy, internal",
+              "type": "string"
+            },
+            "hint": {
+              "description": "the next step to try, written for the calling agent",
+              "type": "string"
+            },
+            "message": {
+              "description": "what failed, as the operation name and the root cause; credentials are removed",
+              "type": "string"
+            },
+            "operation": {
+              "description": "the ONVIF operation that failed; Initialize means connecting to the camera before any operation ran",
+              "type": "string"
+            },
+            "retry_after_seconds": {
+              "description": "wait this many seconds before retrying; present only for calls refused by a rate limit",
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "retryable": {
+              "description": "true when repeating the identical call may succeed with no one changing anything (unreachable, timeout); false means the cause must be fixed first, so do not retry in a loop",
+              "type": "boolean"
+            },
+            "soap": {
+              "additionalProperties": false,
+              "description": "the camera's own SOAP fault, present when the camera answered with one",
+              "properties": {
+                "code": {
+                  "description": "the fault code exactly as the camera sent it, for example ter:NotAuthorized or ter:NoEntity",
+                  "type": "string"
+                },
+                "reason": {
+                  "description": "the fault reason text the camera sent; absent when it sent none",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code"
+              ],
+              "type": [
+                "null",
+                "object"
+              ]
+            }
+          },
+          "required": [
+            "code",
+            "retryable",
+            "message"
+          ],
+          "type": [
+            "null",
+            "object"
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false,
@@ -1645,6 +1847,184 @@
               "type": "string"
             }
           },
+          "type": [
+            "null",
+            "object"
+          ]
+        },
+        "error": {
+          "additionalProperties": false,
+          "description": "present only when the call failed; the result is then also flagged isError",
+          "properties": {
+            "camera": {
+              "description": "the camera id the call addressed; absent when no camera was involved",
+              "type": "string"
+            },
+            "code": {
+              "description": "failure class, one of: unreachable, timeout, auth_failed, not_supported, not_found, invalid_argument, device_fault, blocked_by_policy, internal",
+              "type": "string"
+            },
+            "hint": {
+              "description": "the next step to try, written for the calling agent",
+              "type": "string"
+            },
+            "message": {
+              "description": "what failed, as the operation name and the root cause; credentials are removed",
+              "type": "string"
+            },
+            "operation": {
+              "description": "the ONVIF operation that failed; Initialize means connecting to the camera before any operation ran",
+              "type": "string"
+            },
+            "retry_after_seconds": {
+              "description": "wait this many seconds before retrying; present only for calls refused by a rate limit",
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "retryable": {
+              "description": "true when repeating the identical call may succeed with no one changing anything (unreachable, timeout); false means the cause must be fixed first, so do not retry in a loop",
+              "type": "boolean"
+            },
+            "soap": {
+              "additionalProperties": false,
+              "description": "the camera's own SOAP fault, present when the camera answered with one",
+              "properties": {
+                "code": {
+                  "description": "the fault code exactly as the camera sent it, for example ter:NotAuthorized or ter:NoEntity",
+                  "type": "string"
+                },
+                "reason": {
+                  "description": "the fault reason text the camera sent; absent when it sent none",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code"
+              ],
+              "type": [
+                "null",
+                "object"
+              ]
+            }
+          },
+          "required": [
+            "code",
+            "retryable",
+            "message"
+          ],
+          "type": [
+            "null",
+            "object"
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Stop PTZ movement"
+    },
+    "description": "Use this to stop a PTZ camera that is moving, whether from ptz.move_relative, ptz.goto_preset or anything else. Pass the profile you moved (call media.profiles for a profile with has_ptz true). Stop is per profile: if you are unsure which profile moved, call it once per has_ptz profile. This tool has no dry run and is not rate limited, so it always acts; it only works on cameras the operator opted in to control. It stops pan, tilt and zoom, then reads the camera's status: stop_status confirmed_idle means the camera reports it idle; sent_unconfirmed means the stop was delivered but not confirmed (many cameras report no movement state), so check ptz.status or camera.snapshot. If the stop could not be delivered the call fails and you should call ptz.stop again immediately. Stopping a camera that is already idle is harmless. Does not move the camera.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "camera": {
+          "description": "the camera id, taken from camera.list (its id field)",
+          "type": "string"
+        },
+        "profile": {
+          "description": "the token of the media profile to stop, normally the one you moved; call media.profiles and choose one with has_ptz true. Stop is per profile",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "camera",
+        "profile"
+      ],
+      "type": "object"
+    },
+    "name": "ptz.stop",
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "description": "the result; present only when the call succeeded",
+          "properties": {
+            "executed": {
+              "description": "true when the stop command was sent to the camera",
+              "type": "boolean"
+            },
+            "final": {
+              "additionalProperties": false,
+              "description": "the last PTZ status read after the stop, same shape as ptz.status; absent means none could be read; absent fields were not reported",
+              "properties": {
+                "device_error": {
+                  "description": "error text the camera reports in its PTZ status; absent means none was reported",
+                  "type": "string"
+                },
+                "pan": {
+                  "description": "current pan position; in ONVIF's generic space this is normalised from -1 to 1, otherwise in the camera's own space (ptz.presets reports the limits); absent means not reported",
+                  "type": [
+                    "null",
+                    "number"
+                  ]
+                },
+                "pan_tilt_state": {
+                  "description": "pan/tilt movement state as the camera names it, normally IDLE, MOVING or UNKNOWN; absent means not reported",
+                  "type": "string"
+                },
+                "tilt": {
+                  "description": "current tilt position; in ONVIF's generic space this is normalised from -1 to 1, otherwise in the camera's own space (ptz.presets reports the limits); absent means not reported",
+                  "type": [
+                    "null",
+                    "number"
+                  ]
+                },
+                "zoom": {
+                  "description": "current zoom position; in ONVIF's generic space this runs from 0 to 1, otherwise in the camera's own space (ptz.presets reports the limits); absent means not reported",
+                  "type": [
+                    "null",
+                    "number"
+                  ]
+                },
+                "zoom_state": {
+                  "description": "zoom movement state as the camera names it, normally IDLE, MOVING or UNKNOWN; absent means not reported",
+                  "type": "string"
+                }
+              },
+              "type": [
+                "null",
+                "object"
+              ]
+            },
+            "note": {
+              "description": "what happened and what to do next",
+              "type": "string"
+            },
+            "profile": {
+              "description": "the profile token the stop addressed",
+              "type": "string"
+            },
+            "stop_status": {
+              "description": "confirmed_idle: the stop was delivered and the camera reports it idle; sent_unconfirmed: the stop was delivered but the camera did not confirm it (it reported MOVING or UNKNOWN, reported no movement state, or its status could not be read)",
+              "type": "string"
+            }
+          },
+          "required": [
+            "executed",
+            "stop_status",
+            "profile",
+            "note"
+          ],
           "type": [
             "null",
             "object"

@@ -168,6 +168,14 @@ var (
 	names   = map[weak.Pointer[mcp.Server]]map[string]struct{}{}
 )
 
+// ClaimedCount reports how many tool names have been claimed on srv through
+// GuardedTool, including gated tools skipped because control is off.
+func ClaimedCount(srv *mcp.Server) int {
+	namesMu.Lock()
+	defer namesMu.Unlock()
+	return len(names[weak.Make(srv)])
+}
+
 // claimName records that srv has a tool called name, and panics if it already
 // did: the SDK keeps tools in a map, so a second registration would silently
 // replace a guarded handler with whatever came later. A write tool that is

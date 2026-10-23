@@ -20,7 +20,7 @@ import (
 // version is the server's reported version. It is a var, not a const, so release
 // builds can set it with -ldflags "-X github.com/0x524a/onvif-mcp/internal/mcpserver.version=vX.Y.Z"
 // (scripts/build-release.sh does). A plain go build reports the value below.
-var version = "v0.1.0"
+var version = "v0.2.0"
 
 // Version returns the server version reported during initialisation.
 func Version() string { return version }
@@ -237,9 +237,11 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 	tools.RegisterStream(srv, deps)
 	tools.RegisterSnapshot(srv, deps)
 
-	// The only write tool. It goes through tools.GuardedTool, which keeps it
-	// out of tools/list while control is disabled and lists it in the policy.
+	// The gated tools: ptz.goto_preset and ptz.move_relative (RiskWrite) and
+	// ptz.stop (RiskHalt). They go through tools.GuardedTool, which keeps them
+	// out of tools/list while control is disabled and lists them in the policy.
 	tools.RegisterPTZWrites(srv, deps)
+	tools.RegisterPTZMotion(srv, deps)
 
 	safety.RegisterPolicyResource(srv, policy, func() []safety.CameraGrant {
 		list := reg.List()
@@ -250,6 +252,11 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 		return grants
 	})
 
-	log.Debug("tools registered", "count", 11)
+	gated := len(policy.GatedTools())
+	registered := tools.ClaimedCount(srv) - gated
+	if policy.WriteRegistered() {
+		registered += gated
+	}
+	log.Debug("tools registered", "count", registered, "gated", gated)
 	return srv
 }
