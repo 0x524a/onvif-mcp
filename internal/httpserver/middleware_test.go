@@ -380,3 +380,7 @@ func TestAccessLogHasCallerAndNoSecrets(t *testing.T) {
 		}
 	}
 }
+
+func slogTo(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
