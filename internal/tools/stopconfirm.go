@@ -128,6 +128,14 @@ func attemptBudget(e *registry.Entry) (total, attempt time.Duration) {
 func stopRoundFor(d Deps, e *registry.Entry) func(tokens []string) map[string]stopResult {
 	return func(tokens []string) map[string]stopResult {
 		total, attempt := attemptBudget(e)
+		// The halt guard detaches at haltBudget; keep the round, and the
+		// confirmation after it, inside that so a round never outlives its caller.
+		if capped := haltBudget - confirmWindow; total > capped {
+			total = capped
+			if attempt > total {
+				attempt = total
+			}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), total)
 		defer cancel()
 
@@ -147,13 +155,22 @@ func stopRoundFor(d Deps, e *registry.Entry) func(tokens []string) map[string]st
 	}
 }
 
+// record stores r for tk, keeping sent true if an earlier attempt already
+// dispatched a Stop for it: a later failure must not claim nothing was sent.
+func record(results map[string]stopResult, tk string, r stopResult) {
+	if prev, ok := results[tk]; ok && prev.sent {
+		r.sent = true
+	}
+	results[tk] = r
+}
+
 // stopAttempt runs one Initialize+GetProfiles+Stop pass for tokens, recording
 // every outcome in results, and returns the tokens worth retrying.
 func stopAttempt(ctx context.Context, d Deps, e *registry.Entry, tokens []string, results map[string]stopResult) (retry []string) {
 	fail := func(te *mcperr.ToolError, sent bool, which []string) []string {
 		for _, tk := range which {
 			cp := *te
-			results[tk] = stopResult{sent: sent, te: &cp}
+			record(results, tk, stopResult{sent: sent, te: &cp})
 		}
 		if transient(te) {
 			return which
@@ -167,18 +184,21 @@ func stopAttempt(ctx context.Context, d Deps, e *registry.Entry, tokens []string
 		te.NotSent = true
 		return fail(te, false, tokens)
 	}
-	profiles, err := c.GetProfiles(ctx)
+	// The profile read is best effort and never gates Stop: it gets half the
+	// attempt so a hung media service leaves time for the Stop itself.
+	pctx, pcancel := context.WithTimeout(ctx, attemptShare(ctx))
+	profiles, err := c.GetProfiles(pctx)
+	pcancel()
 	targets := tokens
 	known := map[string]*onvif.Profile{}
 	listed := err == nil
 	if err != nil {
 		te := mcperr.FromError(err, e.ID(), "GetProfiles")
 		te.NotSent = true
-		if transient(te) {
-			return fail(te, false, tokens)
-		}
-		// The profile list is unreadable, so the tokens cannot be checked. Stop is
-		// harmless, so send it for a few tokens; refuse the rest.
+		// The profile list is unreadable (of any class, transient or not), so the
+		// tokens cannot be checked. Stop is harmless on an idle camera and the PTZ
+		// service may be healthy when the media service is not, so send it for a
+		// few tokens; refuse the rest.
 		if len(tokens) > maxBlindStops {
 			over := &mcperr.ToolError{
 				Code: mcperr.CodeUnreachable, Retryable: true, Camera: e.ID(), Operation: "Stop", NotSent: true,
@@ -199,39 +219,52 @@ func stopAttempt(ctx context.Context, d Deps, e *registry.Entry, tokens []string
 		if listed {
 			p, ok := known[tk]
 			if !ok {
-				results[tk] = stopResult{validation: true, te: &mcperr.ToolError{
+				record(results, tk, stopResult{validation: true, te: &mcperr.ToolError{
 					Code: mcperr.CodeInvalidArgument, Camera: e.ID(), Operation: "Stop", NotSent: true,
 					Message: "the camera has no media profile with that token, so nothing was stopped",
 					Hint:    "profiles on this camera: " + listProfiles(profiles) + "; pass one of them as profile",
-				}}
+				}})
 				continue
 			}
 			if p.PTZConfiguration == nil {
-				results[tk] = stopResult{validation: true, te: &mcperr.ToolError{
+				record(results, tk, stopResult{validation: true, te: &mcperr.ToolError{
 					Code: mcperr.CodeNotSupported, Camera: e.ID(), Operation: "Stop", NotSent: true,
 					Message: "that profile carries no PTZ configuration, so there is nothing to stop",
 					Hint:    noPTZHint,
-				}}
+				}})
 				continue
 			}
 		}
 		err := c.Stop(ctx, tk, true, true)
 		switch {
 		case err == nil:
-			results[tk] = stopResult{sent: true}
+			record(results, tk, stopResult{sent: true})
 		case errors.Is(err, onvif.ErrEmptyResponseBody):
 			// HTTP 200 with no body: the camera may have acted, but nothing can be
 			// vouched for.
-			results[tk] = stopResult{sent: true, unverified: true}
+			record(results, tk, stopResult{sent: true, unverified: true})
 		default:
 			te := mcperr.FromError(err, e.ID(), "Stop")
-			results[tk] = stopResult{sent: true, te: te}
+			record(results, tk, stopResult{sent: true, te: te})
 			if transient(te) {
 				retry = append(retry, tk)
 			}
 		}
 	}
 	return retry
+}
+
+// attemptShare is half of what is left of ctx, for the profile read.
+func attemptShare(ctx context.Context) time.Duration {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return minAttempt
+	}
+	d := time.Until(dl) / 2
+	if d < time.Millisecond {
+		d = time.Millisecond
+	}
+	return d
 }
 
 // listProfiles renders up to listedProfMax profile tokens for a hint.
@@ -329,13 +362,17 @@ func stopAndConfirm(ctx context.Context, d Deps, camera, profile string) stopRep
 			Hint:    "call media.profiles and pass the token of a profile whose has_ptz is true",
 		}}
 	}
-	key := e.DeviceKey()
+	// The camera id is part of the key: two ids on one endpoint may hold different
+	// credentials, and a round runs with its creator's registry entry.
+	key := e.DeviceKey() + "\x00" + e.ID()
 
 	r, err := gates.stop.do(ctx, key, profile, stopRoundFor(d, e))
 	if err != nil {
-		msg := "the stop was not delivered: " + err.Error()
-		return stopReport{Status: stopFailed, Err: &mcperr.ToolError{
-			Code: mcperr.CodeInternal, Retryable: true, Camera: camera, Operation: "Stop", NotSent: true,
+		// The round may already have dispatched Stop (the caller's context ended
+		// while it ran, or it panicked after sending), so never claim NotSent.
+		msg := "the stop may not have been delivered: " + err.Error()
+		return stopReport{Status: stopFailed, Sent: true, Err: &mcperr.ToolError{
+			Code: mcperr.CodeInternal, Retryable: true, Camera: camera, Operation: "Stop",
 			Message: msg, Hint: retryStopHint,
 		}}
 	}

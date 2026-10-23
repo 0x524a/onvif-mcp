@@ -603,3 +603,43 @@ func TestEveryStopCallBuildsItsOwnClient(t *testing.T) {
 		}
 	}
 }
+
+// A media-service failure of any class must not keep Stop from the PTZ service.
+func TestStopIsSentWhenGetProfilesFailsTransiently(t *testing.T) {
+	hooks := map[string]func(int, http.ResponseWriter, *http.Request, string) bool{
+		"dropped connection": func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool { dropConn(w); return true },
+		"garbage reply": func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool {
+			_, _ = w.Write([]byte("<not-soap"))
+			return true
+		},
+		"hang": func(_ int, _ http.ResponseWriter, r *http.Request, _ string) bool {
+			select {
+			case <-time.After(5 * time.Second):
+			case <-r.Context().Done():
+			}
+			return true
+		},
+	}
+	for name, hook := range hooks {
+		t.Run(name, func(t *testing.T) {
+			fx := newPtzFx(t)
+			fastGates(t, time.Second, time.Millisecond)
+			fx.on("GetProfiles", hook)
+			rep := stopAndConfirm(stopCtx(), fx.deps(4), "fx", "p1")
+			if fx.count("Stop") == 0 {
+				t.Fatalf("no Stop reached the camera; report %+v", rep)
+			}
+			if !rep.Sent {
+				t.Errorf("Sent = false despite a Stop request: %+v", rep)
+			}
+		})
+	}
+}
+
+func TestRecordKeepsSentAcrossAttempts(t *testing.T) {
+	res := map[string]stopResult{"a": {sent: true}}
+	record(res, "a", stopResult{te: &mcperr.ToolError{Code: mcperr.CodeUnreachable}})
+	if !res["a"].sent {
+		t.Error("a later failure erased the fact that a Stop was dispatched")
+	}
+}

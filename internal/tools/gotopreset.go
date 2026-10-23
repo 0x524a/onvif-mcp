@@ -229,7 +229,7 @@ func checkBudgetFor(ctx, planCtx context.Context, camera, op string) *mcperr.Too
 	if planCtx.Err() != nil {
 		return &mcperr.ToolError{
 			Code: mcperr.CodeTimeout, Retryable: true, Camera: camera, Operation: op, NotSent: true,
-			Message: "checking the profile and preset took longer than the camera's time budget, so nothing was sent",
+			Message: "validating the request took longer than the camera's time budget, so nothing was sent",
 			Hint:    "retry, or ask the operator to raise timeout_seconds for this camera in the config",
 		}
 	}

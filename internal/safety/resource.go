@@ -71,8 +71,8 @@ func (p *Policy) document(cams []CameraGrant) policyDoc {
 	howTo := "an operator must restart the server with --enable-control " +
 		"AND set \"control\": true on the camera's config entry"
 	explanation := "when control is disabled, the write tools listed in gated_write_tools are not " +
-		"registered and do not appear in tools/list; when enabled they still default to dry_run " +
-		"true, so a caller must pass dry_run false to change a camera, and only cameras with " +
+		"registered and do not appear in tools/list; when enabled the write tools still default to dry_run " +
+		"true (the halt tools do not, see below), so a caller must pass dry_run false to change a camera, and only cameras with " +
 		"control_allowed true accept it. control_allowed is a camera's own opt-in and only takes " +
 		"effect when control_enabled is true; writable says whether a camera can be controlled now"
 	why := whyText

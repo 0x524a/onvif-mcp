@@ -65,8 +65,8 @@ func registerPTZStop(srv *mcp.Server, d Deps) {
 	GuardedTool(srv, d, safety.RiskHalt, &mcp.Tool{
 		InputSchema: stopSchema(),
 		Name:        stopTool,
-		Description: "Use this to stop a PTZ camera that is moving, whether from ptz.move_relative, ptz.goto_preset or " +
-			"anything else. Pass the profile you moved (call media.profiles for a profile with has_ptz true). Stop is " +
+		Description: "Use this to stop a PTZ camera that a move started through this server is moving (ptz.move_relative, " +
+			"ptz.goto_preset). It cannot be relied on for motion started by another client. Pass the profile you moved (call media.profiles for a profile with has_ptz true). Stop is " +
 			"per profile: if you are unsure which profile moved, call it once per has_ptz profile. This tool has no dry " +
 			"run and is not rate limited, so it always acts; it only works on cameras the operator opted in to control. " +
 			"It stops pan, tilt and zoom, then reads the camera's status: stop_status confirmed_idle means the camera " +

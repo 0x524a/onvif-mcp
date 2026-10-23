@@ -1,8 +1,11 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -190,4 +193,35 @@ func anyEqual(got []any, want []string) bool {
 		}
 	}
 	return true
+}
+
+// The policy resource is part of the agent-facing surface: its full text is
+// pinned like tools/list. Regenerate with -update when the change is intended.
+func TestPolicyResourceSnapshot(t *testing.T) {
+	for _, mode := range []struct {
+		file    string
+		control bool
+	}{{"policy_control_off.golden.json", false}, {"policy_control_on.golden.json", true}} {
+		t.Run(mode.file, func(t *testing.T) {
+			cs := policyServer(t, func(r *registry.Registry) *safety.Policy { return testPolicy(r, mode.control) })
+			res, err := cs.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: safety.PolicyURI})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := []byte(res.Contents[0].Text + "\n")
+			path := filepath.Join("testdata", mode.file)
+			if *update {
+				if err := os.WriteFile(path, got, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want, err := os.ReadFile(path) //nolint:gosec // fixed golden path under testdata
+			if err != nil {
+				t.Fatalf("read golden (run with -update to create): %v", err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("policy resource differs from %s; review and rerun with -update if intended", path)
+			}
+		})
+	}
 }

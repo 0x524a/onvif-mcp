@@ -30,6 +30,20 @@ matching the pushed tag as the GitHub Release notes, so every tag needs a non-em
 - An opt-in `hardware` test for a relative nudge pair and `ptz.stop` (`ONVIF_MCP_HW_NUDGE`); it has
   not been run against hardware.
 - Tests that pin the go-sdk v1.7.0 handler-context and shutdown behaviour this design relies on.
+- A golden for the `onvif://server/policy` resource, with control on and off.
+
+### Fixed
+
+- `ptz.stop` sends Stop even when the camera's profile list cannot be read for any reason (timeout,
+  dropped connection, garbage reply); the profile read is best effort and gets half the attempt.
+- `ptz.stop` no longer reports a stop as not sent when a round may already have dispatched it (caller
+  context ended, round panicked, or a later attempt failed after an earlier one sent); the audit
+  record follows. Round time is capped inside the halt budget.
+- `ptz.stop` rounds are keyed by camera id as well as device, so cameras sharing an endpoint with
+  different credentials never share a round.
+- `ptz.move_relative` adds a hint on a SOAP fault about the explicit translation space; validation
+  timeouts no longer mention a preset; the `ptz.stop` description no longer claims it stops motion
+  started elsewhere.
 
 ### Changed
 

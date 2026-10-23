@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 
 	onvif "github.com/0x524a/onvif-go"
 	"github.com/google/jsonschema-go/jsonschema"
@@ -127,6 +128,9 @@ func planMove(ctx context.Context, d Deps, in MoveRelativeIn) (*movePlan, *mcper
 	}}, nil
 }
 
+// moveRelativeFaultHint is added when RelativeMove is answered with a SOAP fault.
+const moveRelativeFaultHint = "The camera answered with a SOAP fault; if it names an unsupported space or an invalid translation, the camera rejected the explicit generic translation Space or the step size. This server never resends without the Space; try a smaller step, and report the fault to the operator."
+
 func moveSummary(a Axes) string { return "relative move " + fmtPos(a.Pan, a.Tilt, a.Zoom) }
 
 func moveRelativeDryRun(d Deps) mcp.ToolHandlerFor[MoveRelativeIn, mcperr.Out[MoveData]] {
@@ -179,7 +183,13 @@ func moveRelativeRun(d Deps) mcp.ToolHandlerFor[MoveRelativeIn, mcperr.Out[MoveD
 		if err := plan.c.RelativeMove(ctx, in.Profile, v, nil); err != nil {
 			// The request left the server, so the outcome is unknown: the guard adds
 			// the may-or-may-not-have-moved hint and clears retryable.
-			return fail[MoveData](mcperr.FromError(err, in.Camera, moveRelativeOp))
+			te := mcperr.FromError(err, in.Camera, moveRelativeOp)
+			if te.SOAP != nil {
+				// The camera named a rejection. It may be the explicit generic
+				// translation Space or the value; the server never retries without it.
+				te.Hint = strings.TrimSpace(te.Hint + " " + moveRelativeFaultHint)
+			}
+			return fail[MoveData](te)
 		}
 		plan.data.Executed = true
 		plan.data.Note = "Command accepted, not 'arrived': the camera may still be moving. Call ptz.status after a second; " +
