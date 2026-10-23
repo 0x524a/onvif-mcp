@@ -180,10 +180,23 @@ func clean(s string, limit int) string {
 
 type targetKey struct{}
 
-// TargetSlot holds the resolved target a tool noted during one guarded call.
+// TargetSlot holds the resolved target, and the validated motion, a tool noted
+// during one guarded call.
 type TargetSlot struct {
-	mu sync.Mutex
-	v  string
+	mu     sync.Mutex
+	v      string
+	motion *MotionAudit
+}
+
+// Motion returns the noted motion, or nil.
+func (s *TargetSlot) Motion() *MotionAudit {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.motion == nil {
+		return nil
+	}
+	m := *s.motion
+	return &m
 }
 
 // Get returns the noted target, or "".
@@ -209,6 +222,17 @@ func NoteTarget(ctx context.Context, target string) {
 	if s, ok := ctx.Value(targetKey{}).(*TargetSlot); ok {
 		s.mu.Lock()
 		s.v = target
+		s.mu.Unlock()
+	}
+}
+
+// NoteMotion records the validated motion of the call (typed numbers and a short
+// mode name, never agent text) for the audit record. Without a slot in ctx it
+// does nothing.
+func NoteMotion(ctx context.Context, m MotionAudit) {
+	if s, ok := ctx.Value(targetKey{}).(*TargetSlot); ok {
+		s.mu.Lock()
+		s.motion = &m
 		s.mu.Unlock()
 	}
 }

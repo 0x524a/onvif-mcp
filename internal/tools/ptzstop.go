@@ -37,7 +37,9 @@ type StopData struct {
 // ptz.move_relative (RiskWrite). With control off neither is registered, but
 // both are named by the policy resource.
 func RegisterPTZMotion(srv *mcp.Server, d Deps) {
+	// Stop first: a move tool must never be registered without it.
 	registerPTZStop(srv, d)
+	registerPTZMoveRelative(srv, d)
 }
 
 func stopSchema() *jsonschema.Schema {

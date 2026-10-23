@@ -272,7 +272,11 @@ func guardedHandler[In, Data any](
 					Hint:    "do not retry in a loop; the camera state is unknown, so check it with a read tool and report this to the operator",
 				})
 			}
-			d.Policy.Audit(tool, camera, dry, executed, outcome, safety.WithTarget(target.Get()))
+			auditOpts := []safety.AuditOption{safety.WithTarget(target.Get())}
+			if m := target.Motion(); m != nil {
+				auditOpts = append(auditOpts, safety.WithMotion(*m))
+			}
+			d.Policy.Audit(tool, camera, dry, executed, outcome, auditOpts...)
 		}()
 
 		if dry {

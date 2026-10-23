@@ -214,16 +214,21 @@ func wholeCall(ctx context.Context, d Deps, camera string) (context.Context, con
 // checkBudget reports a call that was cancelled (ctx) or outlived its
 // validation budget (planCtx) as a failure that sent nothing.
 func checkBudget(ctx, planCtx context.Context, camera string) *mcperr.ToolError {
+	return checkBudgetFor(ctx, planCtx, camera, gotoPresetOp)
+}
+
+// checkBudgetFor is checkBudget for the named ONVIF operation.
+func checkBudgetFor(ctx, planCtx context.Context, camera, op string) *mcperr.ToolError {
 	if ctx.Err() != nil {
 		return &mcperr.ToolError{
-			Code: mcperr.CodeInternal, Camera: camera, Operation: gotoPresetOp, NotSent: true,
+			Code: mcperr.CodeInternal, Camera: camera, Operation: op, NotSent: true,
 			Message: "the call was cancelled before the move command was sent",
 			Hint:    "nothing was sent; the server may be shutting down",
 		}
 	}
 	if planCtx.Err() != nil {
 		return &mcperr.ToolError{
-			Code: mcperr.CodeTimeout, Retryable: true, Camera: camera, Operation: gotoPresetOp, NotSent: true,
+			Code: mcperr.CodeTimeout, Retryable: true, Camera: camera, Operation: op, NotSent: true,
 			Message: "checking the profile and preset took longer than the camera's time budget, so nothing was sent",
 			Hint:    "retry, or ask the operator to raise timeout_seconds for this camera in the config",
 		}
