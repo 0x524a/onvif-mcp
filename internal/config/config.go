@@ -115,32 +115,9 @@ type Config struct {
 // the environment, and registers every password with redact so it is scrubbed
 // from any later error or log text.
 func Load(path string) (*Config, error) {
-	// O_NONBLOCK so opening a FIFO returns immediately instead of waiting for
-	// a writer; the Stat below then rejects it.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // path is operator supplied
+	b, err := ReadPrivateFile(path, maxConfigBytes, "config")
 	if err != nil {
-		return nil, fmt.Errorf("open config: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	// Stat the opened handle, not the path, so the checked file is the read file.
-	st, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat config: %w", err)
-	}
-	if !st.Mode().IsRegular() {
-		return nil, ErrNotRegular
-	}
-	if st.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("%w: %s has mode %v; run: chmod 600 %s", ErrConfigPermissions, path, st.Mode().Perm(), path)
-	}
-
-	b, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
-	}
-	if len(b) > maxConfigBytes {
-		return nil, errors.New("config file too large")
+		return nil, err
 	}
 
 	var cfg Config
@@ -408,4 +385,40 @@ func duplicateCameraID(b []byte) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// ReadPrivateFile reads a small secret-bearing file the way Load reads the
+// config: it refuses anything but a regular file, anything readable by group or
+// other (ErrConfigPermissions), and anything over max bytes. The permission
+// check is on the opened handle, not the path, so the checked file is the read
+// file, and opening a FIFO cannot block. what names the file in error text
+// ("config", "token file"); no file content is ever put in an error.
+func ReadPrivateFile(path string, limit int, what string) ([]byte, error) {
+	// O_NONBLOCK so opening a FIFO returns immediately instead of waiting for
+	// a writer; the Stat below then rejects it.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // path is operator supplied
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", what, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	st, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat %s: %w", what, err)
+	}
+	if !st.Mode().IsRegular() {
+		return nil, ErrNotRegular
+	}
+	if st.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("%w: %s has mode %v; run: chmod 600 %s", ErrConfigPermissions, path, st.Mode().Perm(), path)
+	}
+
+	b, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", what, err)
+	}
+	if len(b) > limit {
+		return nil, fmt.Errorf("%s file too large", what)
+	}
+	return b, nil
 }
