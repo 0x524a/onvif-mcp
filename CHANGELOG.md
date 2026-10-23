@@ -9,6 +9,25 @@ matching the pushed tag as the GitHub Release notes, so every tag needs a non-em
 
 ### Added
 
+- Streamable HTTP transport, read-only: `-transport http` with `-listen` (default
+  `127.0.0.1:8808`), `-http-tokens`, `-http-allow-remote`, `-http-allowed-hosts`,
+  `-tls-cert` and `-tls-key`. Stateless, JSON responses, HTTP/1.1 only. Authentication is
+  mandatory: static bearer tokens held as SHA-256 digests in a mode-600 file, one uniform
+  401 for every failure, constant-time comparison. `Host` is checked against an allowlist
+  on every bind and any `Origin` header is refused. A non-loopback bind needs
+  `-http-allow-remote`, in-process TLS (1.2 or newer) and allowed hosts. Bounded
+  connections (total and per remote IP), timeouts, header and body sizes, requests in
+  flight, tool calls in flight (total and per token) and per-call deadline; single-phase
+  drain on shutdown with a second signal ending the process. Details and the limits table
+  are in the README ("Serving over HTTP").
+- `-new-token ID`: print a fresh 256-bit token and its token-file entry, then exit.
+- Per-token `grant` list in the token file: `camera.snapshot`, `camera.discover` and
+  `stream.inspect` are available over HTTP only to tokens granted them, and are hidden from
+  `tools/list` otherwise.
+- `make demo-http`: the virtual camera plus the HTTP server on loopback, read-only, with a
+  throwaway token.
+- Tool-call audit line on HTTP (`tool`, `caller`, `transport`, `outcome`) and an access log
+  with the token id; tokens, digests and `Authorization` values are never logged.
 - `ptz.move_relative` (write, gated): nudge a PTZ camera by a small relative amount in the ONVIF
   generic translation space, with the space URI set explicitly on each vector. Each axis is capped at
   0.25 per call by the server; larger values are refused, not clamped, with an `invalid_argument`
@@ -47,6 +66,17 @@ matching the pushed tag as the GitHub Release notes, so every tag needs a non-em
 
 ### Changed
 
+- **Behaviour change for embedders and tests, none for stdio users:** the write guard now
+  fails closed on identity. `Policy.Evaluate` and `Policy.EvaluateHalt` take the request
+  context and refuse (`caller_unidentified` / `caller_not_granted` in the audit trail,
+  with one agent-facing message) unless it carries a caller with control; the check runs
+  before the camera lookup, so it reveals nothing about camera ids. The stdio server
+  supplies the operator explicitly. `mcpserver.New` without a caller source refuses
+  `tools/call` and `resources/read`.
+- The policy resource on HTTP reports `read-only` with no gated tools and no advice to pass
+  `--enable-control`, identically for every caller.
+- Handler panics in HTTP tool calls are converted to an internal tool error instead of
+  ending the process.
 - With control on, `tools/list` now has thirteen tools (was eleven). With control off it is unchanged.
 - The server reports version `v0.2.0` from source. Nothing is tagged or released yet: the release waits
   for the Streamable HTTP work.
@@ -56,6 +86,9 @@ matching the pushed tag as the GitHub Release notes, so every tag needs a non-em
 Continuous and absolute PTZ moves, a speed parameter, a cumulative travel budget for relative moves,
 and verification on physical cameras. A looping model can still issue up to 30 capped steps a minute
 per device.
+Motion or any other state-changing tool over HTTP (write tools are stdio-only in this
+release), OAuth or mTLS, browser clients, token or certificate hot-reload, and a per-token
+camera allowlist.
 
 ## [0.1.0]
 

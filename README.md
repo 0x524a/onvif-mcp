@@ -23,14 +23,16 @@ instead of raw SOAP.
 
 ## Status
 
-v0.1.0 is the first release: eleven tools, ten of them read-only, over stdio.
-It is tested against onvif-go's virtual camera and has not been verified against physical
+v0.1.0 was the first release: eleven tools, ten of them read-only, over stdio. It has
+been tested against onvif-go's virtual camera and has not been verified against physical
 cameras, whose quirks it may not yet handle. The server is read-only unless the operator
 starts it with `-enable-control` **and** a camera opts in with `"control": true`.
 
-Unreleased, on `main`: two more gated tools, `ptz.move_relative` and `ptz.stop`. They have only
-been exercised against the virtual camera and hand-written SOAP fixtures; nothing here claims
-they work on a physical camera.
+Unreleased, on `main`: two more gated tools, `ptz.move_relative` and `ptz.stop`, and a
+**read-only streamable HTTP transport** (`-transport http`, see
+[Serving over HTTP](#serving-over-http)). Write tools are not offered over HTTP at all.
+All of it has only been exercised against the virtual camera and hand-written SOAP
+fixtures; nothing here claims it works on a physical camera.
 
 ## Quick start
 
@@ -183,6 +185,106 @@ abandons any call still running). The tokens below are the virtual camera's fixe
 
 Each real and dry attempt is also written to the server's stderr as an audit line. Run
 `make demo` again to start the camera back at pan 0, tilt 0.
+
+## Serving over HTTP
+
+`onvif-mcp` speaks stdio by default. `-transport http` serves the **read** tools over
+streamable HTTP instead, so a containerised or remote agent can use them. It is
+stateless (no `Mcp-Session-Id`), answers every request with a single JSON body, and
+speaks HTTP/1.1 only. **No state-changing tool is registered on this transport**:
+`ptz.goto_preset`, `ptz.move_relative` and `ptz.stop` do not exist over HTTP, and
+`-transport http -enable-control` is a usage error (exit 2). Motion stays on stdio.
+
+### Quick start (loopback)
+
+```bash
+make demo-http          # virtual camera + server on 127.0.0.1:8808, read-only
+```
+
+It makes a throwaway token, starts the server, and prints a `curl` line to call
+`camera.list` with it (the token is shown once and is for the demo only). By hand:
+
+```bash
+onvif-mcp -new-token laptop-agent          # line 1: the token (keep it); line 2: its token-file entry
+printf '{"tokens":[%s]}\n' '<line 2>' > tokens.json && chmod 600 tokens.json
+onvif-mcp -config cameras.json -transport http -http-tokens tokens.json   # 127.0.0.1:8808
+```
+
+`openssl rand -hex 32` makes an equivalent token, but `-new-token` also prints the entry
+that goes in the file. The file holds only SHA-256 digests; the token is never stored.
+A client sends `Authorization: Bearer <token>` with each `POST /mcp` (and
+`Accept: application/json, text/event-stream`). Whether a given MCP client lets you set
+that header is up to the client; the Go SDK client does.
+
+### Flags
+
+| Flag | Meaning |
+|------|---------|
+| `-transport stdio\|http` | Default `stdio`. |
+| `-listen ADDR` | HTTP only. Default `127.0.0.1:8808`. An IP literal or `localhost`; other names are refused (a name is never resolved to decide a security property). |
+| `-http-tokens PATH` | Token file, mode 600. **Required** with `-transport http`; there is no unauthenticated mode, loopback included. |
+| `-http-allow-remote` | Permit a non-loopback `-listen`. Needs all of: TLS, a token file, `-http-allowed-hosts`. |
+| `-http-allowed-hosts a,b` | `Host` names accepted besides `localhost`, `127.0.0.1`, `::1` (the loopback defaults apply on a loopback bind only). Exact match, no wildcards. |
+| `-tls-cert PATH`, `-tls-key PATH` | Serve TLS in-process (TLS 1.2 or newer; key file mode 600). Both or neither. Loaded once at start; no reload. |
+| `-new-token ID` | Print a fresh token and its token-file entry, then exit. Only combinable with `-version`. |
+
+Flag errors are exit 2 and are found before any file is opened or socket bound.
+`-snapshot-max-bytes` above its default is refused with `-transport http` (replies are
+buffered in memory).
+
+### Token file
+
+```json
+{"tokens": [
+  {"id": "laptop-agent", "sha256": "<64 lowercase hex>"},
+  {"id": "ops-agent", "sha256": "<64 lowercase hex>", "grant": ["camera.snapshot", "stream.inspect"], "expires": "2027-01-31T00:00:00Z"}
+]}
+```
+
+Every token reads `camera.list`, `camera.describe`, `media.profiles`, `media.stream_uri`,
+`imaging.settings`, `ptz.status` and `ptz.presets`. Three tools reach further and are
+**opt-in per token** through `grant`: `camera.snapshot` (live imagery), `camera.discover`
+(multicast and probing from the server's LAN) and `stream.inspect` (server-originated RTSP
+connections). A token without the grant neither sees nor can call them. Only exactly 64
+lowercase hex characters (what `-new-token` prints) are accepted as a token. Unknown
+fields, including `control`, are rejected. Rotation and revocation are an edit and a
+restart; a call already running for a revoked token finishes (at most 120 s).
+
+### TLS and reverse proxies
+
+Plain HTTP is allowed on loopback only. For another machine use `-tls-cert`/`-tls-key`
+with `-http-allow-remote` and `-http-allowed-hosts`, or bind loopback behind a proxy that
+terminates TLS and pass the public name in `-http-allowed-hosts`. `X-Forwarded-*` is never
+read; the audit log shows the proxy as the peer, and the token id is the identity.
+
+### Limits and responses
+
+These are constants, not flags (`internal/httpserver/options.go`, `internal/mcpserver/http.go`):
+
+| Limit | Value |
+|-------|-------|
+| Connections, total | 128 |
+| Connections per remote IP (IPv6 by /64) | 8, non-loopback peers only: a loopback bind, or a local proxy, is exempt, so put connection limits in the proxy |
+| Read header / whole request / idle / write | 5 s / 30 s / 60 s (authenticated connections only) / 180 s |
+| Header block / request body | 16 KiB / 64 KiB |
+| Requests in flight | 32 (then 503) |
+| Tool calls in flight | 32 in total, 8 per token (then a `blocked_by_policy` tool error with `retry_after_seconds`) |
+| One tool call | 120 s; a camera with a longer `timeout_seconds` is cut off earlier over HTTP |
+| Shutdown | stop accepting, wait up to 10 s for calls in flight, then cancel them and allow 2 s to reply; a second signal ends the process at once |
+
+Status codes: 401 for every authentication failure, with identical bytes; 403 for a `Host`
+off the allowlist or any `Origin` header; 404 for any path but `/mcp`; 405 for GET, DELETE
+and OPTIONS; 400, 413, 415 and 431 for malformed, oversized or mistyped requests; 503
+while draining or when 32 requests are in flight. 429 is not used. Every response sent
+before a request authenticates closes the connection.
+
+Memory: a snapshot reply is buffered. Measured in-process with the SDK (Go 1.26.9),
+one 1 MiB image (1.3 MiB of JSON) raised peak heap use by about 13 MiB, and one 8 MiB
+image (10.7 MiB of JSON) by about 83 MiB: roughly eight to ten times the reply. That is
+why HTTP keeps the 1 MiB default snapshot cap, and an upper estimate with 32 snapshots
+at once is around half a gigabyte. The estimate is arithmetic from the single-request
+figures, not a measurement under load. On a small host, grant `camera.snapshot` to few
+tokens.
 
 ## Reference
 
@@ -467,7 +569,7 @@ own client inside the registry instead:
 - **The response line is about 4/3 of the cap** plus a small overhead, because the image is
   base64 encoded in the JSON-RPC reply: about 11 MB at the 8 MiB maximum. The 4 MiB line limit
   applies to requests the server reads, not to its replies, so the client's own line or message
-  size limit must allow that.
+  size limit must allow that. (That is a stdio fact: over HTTP the request body cap is 64 KiB and a reply is one JSON body.)
 - The snapshot address and the credentials never appear in the input or output.
 
 </details>
@@ -508,9 +610,21 @@ preset is safe to visit; the test cannot judge that. Do not commit your config o
 
 onvif-mcp deliberately exposes a small surface. It does **not**:
 
-- Speak anything but stdio. There is no HTTP transport, no authentication of MCP clients
-  and no multi-user mode: whoever can write to the server's stdin can use every tool the
-  operator enabled.
+- Speak anything but stdio and streamable HTTP. Over HTTP it does **not** offer motion
+  or any state-changing tool (those exist on stdio only), implement OAuth or mTLS (static
+  bearer tokens only, so a client that can only do OAuth cannot connect), or serve browser
+  clients (any `Origin` header is refused and no CORS header is ever set). It keeps no
+  sessions and supports no resumption, never trusts `X-Forwarded-*`, and does not reload
+  tokens or certificates without a restart. It does not isolate callers from one another:
+  any valid token can read the metadata and endpoints of every configured camera and the
+  policy resource, `control_allowed` is advisory and unusable over HTTP, and the only
+  per-token distinction is the grant of `camera.snapshot`, `camera.discover` and
+  `stream.inspect`. It does not apply the per-IP connection cap to loopback peers (put
+  limits in the proxy) and does not defend against distributed connection floods (put a
+  proxy in front for public exposure). Nothing about HTTP has been verified against
+  physical cameras any more than stdio has. On stdio there is no authentication and no
+  multi-user mode: whoever can write the server's stdin can use every tool the operator
+  enabled.
 - Prove it works on real cameras. It is exercised against onvif-go's virtual camera only;
   vendor quirks, partial ONVIF profiles and unusual firmware are untested.
 - Subscribe to or pull ONVIF events. The client library supports PullPoint, but the

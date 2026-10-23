@@ -1,4 +1,4 @@
-.PHONY: build test check lint fmt demo hardware release-check release-dry-run
+.PHONY: build test check lint fmt demo demo-http hardware release-check release-dry-run
 
 build:
 	go build ./...
@@ -30,6 +30,30 @@ demo:
 		i=$$((i+1)); [ $$i -lt 50 ] || { echo "virtual camera did not start" >&2; exit 1; }; sleep 0.1; done; \
 	echo "onvif-mcp ready on stdio (control enabled for the demo camera); see README, Try it without a camera" >&2; \
 	"$$d/onvif-mcp" -config "$$d/demo.json" -enable-control
+
+# demo-http is demo for the HTTP transport: the virtual camera plus the MCP server
+# on 127.0.0.1:8808, read-only (HTTP offers no write tool, so there is no control
+# here). It makes a throwaway token with -new-token, writes only its digest to a
+# 0600 token file, prints a ready-to-paste curl line (the token is shown once and is
+# for this demo only), and runs until you press ctrl-c.
+demo-http:
+	@set -e; d=$$(mktemp -d); \
+	trap 'kill $$cam $$srv 2>/dev/null || true; rm -rf "$$d"' EXIT INT TERM; \
+	go build -o "$$d/demo-camera" ./cmd/demo-camera </dev/null; \
+	go build -o "$$d/onvif-mcp" ./cmd/onvif-mcp </dev/null; \
+	cp testdata/demo.json "$$d/demo.json"; chmod 600 "$$d/demo.json"; \
+	"$$d/onvif-mcp" -new-token demo > "$$d/new-token.out"; \
+	token=$$(sed -n 1p "$$d/new-token.out"); entry=$$(sed -n 2p "$$d/new-token.out"); \
+	printf '{"tokens":[%s]}\n' "$$entry" > "$$d/tokens.json"; chmod 600 "$$d/tokens.json"; \
+	"$$d/demo-camera" </dev/null & cam=$$!; \
+	i=0; until curl -s -o /dev/null </dev/null http://127.0.0.1:18080/onvif/device_service; do \
+		i=$$((i+1)); [ $$i -lt 50 ] || { echo "virtual camera did not start" >&2; exit 1; }; sleep 0.1; done; \
+	"$$d/onvif-mcp" -config "$$d/demo.json" -transport http -listen 127.0.0.1:8808 -http-tokens "$$d/tokens.json" </dev/null & srv=$$!; \
+	i=0; until curl -s -o /dev/null </dev/null http://127.0.0.1:8808/mcp; do \
+		i=$$((i+1)); [ $$i -lt 50 ] || { echo "onvif-mcp did not start" >&2; exit 1; }; sleep 0.1; done; \
+	echo "onvif-mcp serving read-only streamable HTTP on http://127.0.0.1:8808/mcp (demo token, shown once):" >&2; \
+	echo "curl -s http://127.0.0.1:8808/mcp -H 'Authorization: Bearer '$$token -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"camera.list\",\"arguments\":{}}}'" >&2; \
+	wait $$srv
 
 # hardware runs the opt-in real-camera tier (build tag "hardware"). It is not
 # part of check and CI never runs it. ONVIF_MCP_HW_CONFIG must name a mode-0600
