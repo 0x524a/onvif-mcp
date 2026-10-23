@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -37,6 +38,7 @@ type srvRig struct {
 	inTool atomic.Int32
 	hold   chan struct{}
 	log    *testLog
+	mcp    *mcp.Server
 }
 
 func shortTimeouts() *timeouts {
@@ -51,6 +53,7 @@ func startServer(t *testing.T, tm *timeouts, tlsFiles ...string) *srvRig {
 	r := &srvRig{hold: make(chan struct{}), log: &testLog{}}
 	r.base, r.cb = context.WithCancel(context.Background())
 	m := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	r.mcp = m
 	mcp.AddTool(m, &mcp.Tool{Name: "hold", Description: "x"},
 		func(_ context.Context, _ *mcp.CallToolRequest, _ pinIn) (*mcp.CallToolResult, pinOut, error) {
 			r.inTool.Add(1)
@@ -392,4 +395,15 @@ func TestNoGoroutineLeakAfterShutdown(t *testing.T) {
 	if n := runtime.NumGoroutine(); n > before+2 {
 		t.Errorf("goroutines: %d before, %d after shutdown", before, n)
 	}
+}
+
+// addBigTool registers a tool returning an 8 MiB image, for the large-reply tests.
+func (r *srvRig) addBigTool(t *testing.T) {
+	t.Helper()
+	mcp.AddTool(r.mcp, &mcp.Tool{Name: "big", Description: "x"},
+		func(_ context.Context, _ *mcp.CallToolRequest, _ pinIn) (*mcp.CallToolResult, any, error) {
+			return &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.ImageContent{Data: bytes.Repeat([]byte{0xAB}, 8<<20), MIMEType: "image/jpeg"},
+			}}, nil, nil
+		})
 }
