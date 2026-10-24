@@ -16,19 +16,19 @@
 </p>
 
 An agent that can move a camera can also point it at the wrong place, forever, in a loop. onvif-mcp
-gives an agent thirteen tools over stdio on `main`: ten read the camera, and three act on it
-behind separate gates (the v0.1.0 release has eleven; see Status). Credentials never appear in a tool argument, every string that leaves the
+gives an agent thirteen tools over stdio: ten read the camera, and three act on it
+behind separate gates. Credentials never appear in a tool argument, every string that leaves the
 server is scrubbed, and a camera that misbehaves produces an error the agent can act on
 instead of raw SOAP.
 
 ## Status
 
-v0.1.0 was the first release: eleven tools, ten of them read-only, over stdio. It has
+v0.2.0 adds two gated PTZ tools and a read-only HTTP transport to the eleven tools of v0.1.0. It has
 been tested against onvif-go's virtual camera and has not been verified against physical
 cameras, whose quirks it may not yet handle. The server is read-only unless the operator
 starts it with `-enable-control` **and** a camera opts in with `"control": true`.
 
-Unreleased, on `main`: two more gated tools, `ptz.move_relative` and `ptz.stop`, and a
+New in v0.2.0: two more gated tools, `ptz.move_relative` and `ptz.stop`, and a
 **read-only streamable HTTP transport** (`-transport http`, see
 [Serving over HTTP](#serving-over-http)). Write tools are not offered over HTTP at all.
 All of it has only been exercised against the virtual camera and hand-written SOAP

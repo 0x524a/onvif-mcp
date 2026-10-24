@@ -7,6 +7,11 @@ matching the pushed tag as the GitHub Release notes, so every tag needs a non-em
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-23
+
+Two gated PTZ tools over stdio and a read-only streamable HTTP transport. Not yet verified on a
+physical camera: the `hardware` tier for `ptz.move_relative` and `ptz.stop` has not been run.
+
 ### Added
 
 - HTTP hardening from review: JSON-RPC batch arrays are refused with 400 (one 64 KiB batch
@@ -84,8 +89,7 @@ matching the pushed tag as the GitHub Release notes, so every tag needs a non-em
 - Handler panics in HTTP tool calls are converted to an internal tool error instead of
   ending the process.
 - With control on, `tools/list` now has thirteen tools (was eleven). With control off it is unchanged.
-- The server reports version `v0.2.0` from source. Nothing is tagged or released yet: the release waits
-  for the Streamable HTTP work.
+- The server reports version `v0.2.0` from source.
 
 ### Not included
 
@@ -132,5 +136,6 @@ inspection and guarded PTZ control as typed tools for an LLM agent.
 ONVIF events, continuous, relative or absolute PTZ, imaging or device writes, video serving, any
 transport but stdio, and verification on physical cameras.
 
-[Unreleased]: https://github.com/0x524a/onvif-mcp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/0x524a/onvif-mcp/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/0x524a/onvif-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/0x524a/onvif-mcp/releases/tag/v0.1.0
