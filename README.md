@@ -25,7 +25,7 @@ instead of raw SOAP.
 
 v0.2.x adds two gated PTZ tools and a read-only HTTP transport to the eleven tools of v0.1.0. The
 read tools have been run against five physical cameras (Axis, Reolink, Bosch), and `ptz.move_relative`
-with `ptz.stop` against one Reolink TrackMix. Everything else, `ptz.goto_preset` included, has only
+with `ptz.stop`, and `ptz.goto_preset`, against one Reolink TrackMix. Everything else has only
 been exercised against onvif-go's virtual camera and hand-written SOAP fixtures, so other cameras'
 quirks may not be handled yet. The server is read-only unless the operator starts it with
 `-enable-control` **and** a camera opts in with `"control": true`.

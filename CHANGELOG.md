@@ -7,6 +7,10 @@ matching the pushed tag as the GitHub Release notes, so every tag needs a non-em
 
 ## [Unreleased]
 
+### Verified
+
+- `ptz.goto_preset` passed the gated hardware move on the Reolink TrackMix (one preset, no return preset).
+
 ## [0.2.1] - 2026-10-25
 
 ### Fixed
