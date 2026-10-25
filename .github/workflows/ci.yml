@@ -23,7 +23,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.25'
+          go-version: '1.26'
           cache: true
       - run: go build ./...
       - run: go vet ./...
@@ -35,8 +35,8 @@ jobs:
           version: v2.13.2
 
   go-floor:
-    # go.mod declares 1.25.0; prove the module still builds, vets and tests on
-    # exactly that release, not only on the latest 1.25 patch.
+    # go.mod declares 1.26.0; prove the module still builds, vets and tests on
+    # exactly that release, not only on the latest 1.26 patch.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,7 +44,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.25.0'
+          go-version: '1.26.0'
           cache: true
       - run: go build ./...
       - run: go vet ./...
@@ -58,7 +58,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.25'
+          go-version: '1.26'
           cache: true
       - run: go mod tidy
       - name: go.mod and go.sum are tidy
@@ -91,7 +91,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.25'
+          go-version: '1.26'
           cache: true
       - name: build ${{ matrix.goos }}/${{ matrix.goarch }}
         env:

@@ -54,7 +54,7 @@ onvif-mcp -config cameras.json
 ```
 
 Then point your MCP client at the `onvif-mcp` command with `-config cameras.json` as its arguments.
-Go 1.25 or newer is required to build.
+Go 1.26 or newer is required to build.
 
 ## Tools
 

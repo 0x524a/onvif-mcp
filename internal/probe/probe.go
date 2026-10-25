@@ -322,7 +322,7 @@ func classify(idx int, m *description.Media) Track {
 		return t
 	}
 	f := m.Formats[0]
-	t.Format = f.Codec()
+	t.Format = codecName(f)
 	if m.Type != description.MediaTypeVideo {
 		return t
 	}
@@ -497,4 +497,12 @@ func (f FakeProber) Describe(context.Context, string, time.Duration) (*Result, e
 		return nil, f.Err
 	}
 	return f.Result, nil
+}
+
+// codecName is the encoding name from the format's rtpmap ("H264" from
+// "H264/90000"). gortsplib's Format.Codec is deprecated and slated for removal,
+// so the name is read from the SDP attribute the camera sent instead.
+func codecName(f format.Format) string {
+	name, _, _ := strings.Cut(f.RTPMap(), "/")
+	return name
 }

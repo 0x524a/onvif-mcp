@@ -7,6 +7,10 @@ matching the pushed tag as the GitHub Release notes, so every tag needs a non-em
 
 ## [Unreleased]
 
+### Changed
+
+- **Go 1.26 or newer is now required** (go.mod `go 1.26.0`), because rtspeek v1.0.0 and go-sdk v1.8.0 need it. Dependencies: rtspeek 0.2.0 to 1.0.0, go-sdk 1.7.0 to 1.8.0, gortsplib 5.5.0 to 5.6.6, mediacommon 2.9.3 to 2.9.5, and indirect updates. `stream.inspect` reads the codec name from the stream's rtpmap instead of gortsplib's deprecated `Format.Codec`.
+
 ### Verified
 
 - `ptz.goto_preset` passed the gated hardware move on the Reolink TrackMix (one preset, no return preset).
