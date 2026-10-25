@@ -56,6 +56,29 @@ onvif-mcp -config cameras.json
 Then point your MCP client at the `onvif-mcp` command with `-config cameras.json` as its arguments.
 Go 1.26 or newer is required to build.
 
+## Install a release
+
+Each [release](https://github.com/0x524a/onvif-mcp/releases) has static binaries for linux, darwin
+and windows on amd64 and arm64, a `SHA256SUMS` file, and a signed build provenance attestation.
+
+```bash
+V=v0.2.1; OS=linux; ARCH=amd64        # or darwin/windows, arm64
+curl -fsSLO https://github.com/0x524a/onvif-mcp/releases/download/$V/onvif-mcp_${V}_${OS}_${ARCH}.tar.gz
+curl -fsSLO https://github.com/0x524a/onvif-mcp/releases/download/$V/SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS            # macOS: shasum -a 256 -c, after removing other lines
+tar xzf onvif-mcp_${V}_${OS}_${ARCH}.tar.gz && ./onvif-mcp -version
+```
+
+To check that the archive was built by this repository's release workflow from the tagged commit,
+use GitHub CLI 2.49 or newer (`gh attestation verify` does not exist before that):
+
+```bash
+gh attestation verify onvif-mcp_${V}_${OS}_${ARCH}.tar.gz --repo 0x524a/onvif-mcp
+```
+
+Builds are reproducible: `make release-check VERSION=$V` on a checkout of the tag produces the same
+checksums.
+
 ## Tools
 
 | Tool | Purpose | Kind |
