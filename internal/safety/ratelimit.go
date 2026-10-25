@@ -1,6 +1,7 @@
 package safety
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -117,11 +118,33 @@ func (l *Limiter) Allow(key string) (bool, time.Duration) {
 }
 
 // AllowGrant is Allow that also returns the grant number of the token it
-// consumed, for RefundGrant. The number is 0 on refusal.
+// consumed, for RefundGrant. The number is 0 on refusal. It is TakeCost of one
+// token plus that grant bookkeeping.
 func (l *Limiter) AllowGrant(key string) (bool, time.Duration, uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.takeLocked(key, 1)
+}
 
+// TakeCost consumes cost tokens for key at once, or nothing. On refusal it
+// reports how long until cost tokens will be available. A Limiter used as a
+// budget measured in seconds of motion (Policy.MotionBudget) is charged the
+// whole requested duration this way, up front. A cost that is not a positive
+// finite number, or that exceeds the burst and so can never be granted, is
+// refused with a wait of one interval and charges nothing. A full key table
+// refuses, as Allow does. It is safe for concurrent use.
+func (l *Limiter) TakeCost(key string, cost float64) (bool, time.Duration) {
+	if !(cost > 0) || math.IsInf(cost, 0) || cost > l.burst {
+		return false, l.interval
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	ok, wait, _ := l.takeLocked(key, cost)
+	return ok, wait
+}
+
+// takeLocked charges cost tokens. Caller holds l.mu.
+func (l *Limiter) takeLocked(key string, cost float64) (bool, time.Duration, uint64) {
 	now := l.now()
 	b, seen := l.buckets[key]
 	if !seen {
@@ -141,12 +164,12 @@ func (l *Limiter) AllowGrant(key string) (bool, time.Duration, uint64) {
 		}
 	}
 
-	if b.tokens >= 1 {
-		b.tokens--
+	if b.tokens >= cost {
+		b.tokens -= cost
 		b.grants++
 		return true, 0, b.grants
 	}
-	missing := 1 - b.tokens
+	missing := cost - b.tokens
 	wait := time.Duration(missing * float64(l.interval))
 	if wait < time.Nanosecond {
 		wait = time.Nanosecond

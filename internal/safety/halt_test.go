@@ -64,10 +64,10 @@ func TestEvaluateHaltAllowsWithoutLogLimiterOrBudget(t *testing.T) {
 
 func TestEvaluateHaltIsNotRateLimitedWhenTheBucketIsExhausted(t *testing.T) {
 	p, _, _ := newPolicy(true)
-	if d := p.Evaluate(opCtx(), "cam-a", tool, false); d.Blocked != nil {
+	if d := evalDone(opCtx(), p, "cam-a", tool, false); d.Blocked != nil {
 		t.Fatal(d.Blocked)
 	}
-	if d := p.Evaluate(opCtx(), "cam-a", tool, false); d.Blocked == nil {
+	if d := evalDone(opCtx(), p, "cam-a", tool, false); d.Blocked == nil {
 		t.Fatal("harness: the bucket should be exhausted")
 	}
 	for i := 0; i < 50; i++ {

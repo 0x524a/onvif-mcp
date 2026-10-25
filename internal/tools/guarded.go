@@ -226,7 +226,7 @@ func cancelled[Data any](d Deps, tool, camera, shown string, dry bool) (*mcp.Cal
 
 // guardedHandler wraps run and dryRun in the guard. See GuardedTool.
 func guardedHandler[In, Data any](
-	d Deps, tool string, run, dryRun mcp.ToolHandlerFor[In, mcperr.Out[Data]],
+	d Deps, tool string, run, dryRun mcp.ToolHandlerFor[In, mcperr.Out[Data]], evalOpts ...safety.EvalOption,
 ) mcp.ToolHandlerFor[In, mcperr.Out[Data]] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (
 		res *mcp.CallToolResult, out mcperr.Out[Data], err error,
@@ -251,10 +251,15 @@ func guardedHandler[In, Data any](
 			return cancelled[Data](d, tool, camera, shown, dry)
 		}
 
-		dec := d.Policy.Evaluate(ctx, camera, tool, dry)
+		dec := d.Policy.Evaluate(ctx, camera, tool, dry, evalOpts...)
 		if dec.Blocked != nil {
 			return fail[Data](dec.Blocked)
 		}
+		// A real write holds the device until the handler returns, panics or is
+		// cancelled: this defer runs last, after the audit and after any stop the
+		// tool itself sends on the way out.
+		defer dec.Lease.Release()
+		ctx = safety.WithLease(ctx, dec.Lease)
 		// Evaluate may have spent rate budget; do not start the write if the
 		// call was cancelled or the server began shutting down meanwhile.
 		refund := func() {

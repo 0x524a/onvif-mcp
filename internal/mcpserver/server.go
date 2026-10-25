@@ -281,7 +281,11 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 		list := reg.List()
 		grants := make([]safety.CameraGrant, 0, len(list))
 		for _, c := range list {
-			grants = append(grants, safety.CameraGrant{ID: c.ID, ControlAllowed: c.Control})
+			g := safety.CameraGrant{ID: c.ID, ControlAllowed: c.Control}
+			if e, err := reg.Get(c.ID); err == nil {
+				g.PTZHonoursTimeout = e.HonoursTimeout()
+			}
+			grants = append(grants, g)
 		}
 		return grants
 	})

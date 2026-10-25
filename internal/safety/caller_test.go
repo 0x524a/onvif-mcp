@@ -60,3 +60,13 @@ func TestRemoteCallerRefusesStdioAndBadInput(t *testing.T) {
 		}
 	}
 }
+
+// evalDone is Evaluate for tests of the gates before the lease: it releases an
+// allowed call's device lease at once, as the guarded handler does when the
+// call returns, so sequential calls model sequential tool calls. The lease
+// itself is tested in lease_test.go and motion_test.go.
+func evalDone(ctx context.Context, p *Policy, camera, tool string, dryRun bool, opts ...EvalOption) Decision {
+	d := p.Evaluate(ctx, camera, tool, dryRun, opts...)
+	d.Lease.Release()
+	return d
+}

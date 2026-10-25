@@ -30,7 +30,7 @@ func lastReason(t *testing.T, buf *syncBuf) (string, map[string]any) {
 func TestEvaluateRefusesWithoutACallerBeforeAnythingElse(t *testing.T) {
 	for _, dry := range []bool{false, true} {
 		p, buf, _ := newPolicy(true)
-		d := p.Evaluate(context.Background(), "cam-a", tool, dry)
+		d := evalDone(context.Background(), p, "cam-a", tool, dry)
 		if d.Blocked == nil || d.Blocked.Code != mcperr.CodeBlockedByPolicy {
 			t.Fatalf("dry=%v: no caller must be blocked_by_policy, got %+v", dry, d.Blocked)
 		}
@@ -49,7 +49,7 @@ func TestEvaluateRefusesWithoutACallerBeforeAnythingElse(t *testing.T) {
 func TestEvaluateRefusesAZeroCallerStoredInContext(t *testing.T) {
 	p, _, _ := newPolicy(true)
 	ctx := WithCaller(context.Background(), Caller{})
-	if d := p.Evaluate(ctx, "cam-a", tool, false); d.Blocked == nil {
+	if d := evalDone(ctx, p, "cam-a", tool, false); d.Blocked == nil {
 		t.Fatal("a zero Caller in the context must be refused")
 	}
 }
@@ -57,7 +57,7 @@ func TestEvaluateRefusesAZeroCallerStoredInContext(t *testing.T) {
 func TestEvaluateRefusesAValidCallerWithoutControl(t *testing.T) {
 	for _, dry := range []bool{false, true} {
 		p, buf, _ := newPolicy(true)
-		d := p.Evaluate(remoteCtx(t), "cam-a", tool, dry)
+		d := evalDone(remoteCtx(t), p, "cam-a", tool, dry)
 		if d.Blocked == nil || d.Blocked.Code != mcperr.CodeBlockedByPolicy {
 			t.Fatalf("dry=%v: remote caller must be blocked_by_policy, got %+v", dry, d.Blocked)
 		}
@@ -75,9 +75,9 @@ func TestEvaluateRefusesAValidCallerWithoutControl(t *testing.T) {
 	// The refusal cost no rate budget: the operator's first real call still passes.
 	p, _, _ := newPolicy(true)
 	for i := 0; i < 5; i++ {
-		p.Evaluate(remoteCtx(t), "cam-a", tool, false)
+		evalDone(remoteCtx(t), p, "cam-a", tool, false)
 	}
-	if d := p.Evaluate(opCtx(), "cam-a", tool, false); d.Blocked != nil {
+	if d := evalDone(opCtx(), p, "cam-a", tool, false); d.Blocked != nil {
 		t.Fatalf("operator call after refused remote calls: %+v", d.Blocked)
 	}
 }
@@ -95,7 +95,7 @@ func TestCallerRefusalIsIdenticalForEveryCameraId(t *testing.T) {
 	for _, ctx := range []context.Context{context.Background(), remoteCtx(t)} {
 		want = nil
 		for _, cam := range []string{"cam-a", "cam-fixed", "no-such-camera", ""} {
-			for _, d := range []Decision{p.Evaluate(ctx, cam, tool, false), p.Evaluate(ctx, cam, tool, true), p.EvaluateHalt(ctx, cam, haltTool)} {
+			for _, d := range []Decision{evalDone(ctx, p, cam, tool, false), evalDone(ctx, p, cam, tool, true), p.EvaluateHalt(ctx, cam, haltTool)} {
 				if d.Blocked == nil {
 					t.Fatalf("camera %q was not refused", cam)
 				}
@@ -129,10 +129,10 @@ func TestEvaluateHaltIsCallerGated(t *testing.T) {
 
 func TestStdioOperatorKeepsTheExistingGateOrder(t *testing.T) {
 	p, _, _ := newPolicy(true)
-	if d := p.Evaluate(opCtx(), "nope", tool, false); d.Blocked == nil || d.Blocked.Code != mcperr.CodeNotFound {
+	if d := evalDone(opCtx(), p, "nope", tool, false); d.Blocked == nil || d.Blocked.Code != mcperr.CodeNotFound {
 		t.Errorf("operator + unknown camera must still be not_found, got %+v", d.Blocked)
 	}
-	if d := p.Evaluate(opCtx(), "cam-fixed", tool, false); d.Blocked == nil || d.Blocked.Code != mcperr.CodeBlockedByPolicy {
+	if d := evalDone(opCtx(), p, "cam-fixed", tool, false); d.Blocked == nil || d.Blocked.Code != mcperr.CodeBlockedByPolicy {
 		t.Errorf("operator + ungranted camera must still be blocked, got %+v", d.Blocked)
 	}
 }

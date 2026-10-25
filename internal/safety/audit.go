@@ -90,17 +90,64 @@ func (p *Policy) Audit(tool, camera string, dryRun, executed bool, outcome strin
 		attrs = append(attrs, "target", clean(x.target, maxAuditTarget))
 	}
 	if m := x.motion; m != nil {
-		attrs = append(attrs, "motion_mode", clean(m.Mode, maxAuditMode))
-		for _, a := range []struct {
-			k string
-			v *float64
-		}{{"motion_pan", m.Pan}, {"motion_tilt", m.Tilt}, {"motion_zoom", m.Zoom}} {
-			if a.v != nil && !math.IsNaN(*a.v) && !math.IsInf(*a.v, 0) {
-				attrs = append(attrs, a.k, *a.v)
-			}
-		}
+		attrs = append(attrs, motionAttrs(*m)...)
 	}
 	p.Log.Info("write attempt", attrs...)
+}
+
+// motionAttrs renders the typed axes of m; a nil or non-finite axis is omitted.
+func motionAttrs(m MotionAudit) []any {
+	attrs := []any{"motion_mode", clean(m.Mode, maxAuditMode)}
+	for _, a := range []struct {
+		k string
+		v *float64
+	}{{"motion_pan", m.Pan}, {"motion_tilt", m.Tilt}, {"motion_zoom", m.Zoom}} {
+		if a.v != nil && !math.IsNaN(*a.v) && !math.IsInf(*a.v, 0) {
+			attrs = append(attrs, a.k, *a.v)
+		}
+	}
+	return attrs
+}
+
+// AuditMotionStarted records, before the command is sent, that a timed motion
+// (a continuous move) is about to start: a server-generated motion id, the
+// validated axes and the requested duration. It is paired with
+// AuditMotionStopped by motion id, so a log that has a start without a stop
+// shows a motion whose end this process did not see. Only typed values and
+// server-chosen short codes reach the log.
+func (p *Policy) AuditMotionStarted(tool, camera, motionID string, m MotionAudit, durationMs int64) {
+	if p == nil || p.Log == nil {
+		return
+	}
+	p.Log.Info("motion started", append([]any{
+		"tool", clean(tool, maxAuditCamera),
+		"camera", clean(camera, maxAuditCamera),
+		"motion_id", clean(motionID, maxAuditMode),
+		"duration_ms", durationMs,
+	}, motionAttrs(m)...)...)
+}
+
+// AuditMotionStopped records how a timed motion ended: what ended the wait
+// (stoppedBy: deadline, ptz.stop, cancelled, shutdown, send_failed or panic) and
+// the stop outcome (confirmed_idle, sent_unconfirmed or failed). ok false means
+// the server could not deliver its stop, so the camera may still be moving; that
+// record is written at Error level.
+func (p *Policy) AuditMotionStopped(tool, camera, motionID, stoppedBy, stopStatus string, ok bool) {
+	if p == nil || p.Log == nil {
+		return
+	}
+	attrs := []any{
+		"tool", clean(tool, maxAuditCamera),
+		"camera", clean(camera, maxAuditCamera),
+		"motion_id", clean(motionID, maxAuditMode),
+		"stopped_by", clean(stoppedBy, maxAuditMode),
+		"stop_status", clean(stopStatus, maxAuditMode),
+	}
+	if !ok {
+		p.Log.Error("motion stopped", append(attrs, "motion_may_continue", true)...)
+		return
+	}
+	p.Log.Info("motion stopped", attrs...)
 }
 
 // auditBlocked records a refusal. reason is one of the Reason constants.

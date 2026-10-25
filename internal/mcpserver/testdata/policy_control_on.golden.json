@@ -13,15 +13,18 @@
     {
       "id": "cam-a",
       "control_allowed": true,
-      "writable": true
+      "writable": true,
+      "ptz_honours_timeout": false
     },
     {
       "id": "cam-fixed",
       "control_allowed": false,
-      "writable": false
+      "writable": false,
+      "ptz_honours_timeout": false
     }
   ],
   "rate_limit_per_camera": "one movement per 2s, burst 1",
+  "continuous_motion_budget_per_camera": "5 seconds of motion, regained at one second per 4s, charged in full before each continuous move starts",
   "how_to_enable": "control is already enabled on this server; cameras that have not opted in (cam-fixed) need an operator to set \"control\": true on their config entry and restart the server",
   "dry_run_default": true,
   "explanation": "when control is disabled, the write tools listed in gated_write_tools are not registered and do not appear in tools/list; when enabled the write tools still default to dry_run true (the halt tools do not, see below), so a caller must pass dry_run false to change a camera, and only cameras with control_allowed true accept it. control_allowed is a camera's own opt-in and only takes effect when control_enabled is true; writable says whether a camera can be controlled now. ptz.stop stops motion and is listed in gated_write_tools too, but has no dry run and is not rate limited: it is available whenever control is enabled and the camera opted in, so a stop is never held back by the movement rate limit",

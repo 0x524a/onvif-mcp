@@ -22,6 +22,11 @@ type CameraGrant struct {
 	ID             string `json:"id" jsonschema:"the camera id"`
 	ControlAllowed bool   `json:"control_allowed" jsonschema:"the camera opted in to control in its config entry; only effective when control_enabled is true"`
 	Writable       bool   `json:"writable" jsonschema:"true when write tools can act on this camera now: control_allowed and control_enabled"`
+	// PTZHonoursTimeout is the operator's attestation that the camera ends a
+	// continuous move by itself when its ONVIF Timeout runs out. Only cameras
+	// with it accept ptz.move_continuous. It is reported as configured, without
+	// combining it with control_enabled, like control_allowed.
+	PTZHonoursTimeout bool `json:"ptz_honours_timeout" jsonschema:"the operator attests this camera ends a continuous move by itself when its ONVIF Timeout runs out; only such cameras accept ptz.move_continuous"`
 }
 
 type policyDoc struct {
@@ -31,6 +36,7 @@ type policyDoc struct {
 	HaltTools          []string      `json:"halt_tools"`
 	Cameras            []CameraGrant `json:"cameras"`
 	RateLimitPerCamera string        `json:"rate_limit_per_camera"`
+	MotionBudget       string        `json:"continuous_motion_budget_per_camera"`
 	HowToEnable        string        `json:"how_to_enable"`
 	DryRunDefault      bool          `json:"dry_run_default"`
 	Explanation        string        `json:"explanation"`
@@ -43,6 +49,28 @@ func (p *Policy) rateLimitText() string {
 		return "no real movement is permitted: no rate limiter is configured"
 	}
 	return fmt.Sprintf("one movement per %s, burst %d", p.Limiter.Interval(), p.Limiter.Burst())
+}
+
+// motionBudgetText describes the continuous-motion budget that is in force.
+func (p *Policy) motionBudgetText() string {
+	if p == nil || p.MotionBudget == nil {
+		return "no continuous movement is permitted: no motion budget is configured"
+	}
+	return fmt.Sprintf("%d seconds of motion, regained at one second per %s, charged in full before each continuous move starts",
+		p.MotionBudget.Burst(), p.MotionBudget.Interval())
+}
+
+// timedText explains the tools noted with NoteTimed, or is empty.
+func timedText(timed []string) string {
+	if len(timed) == 0 {
+		return ""
+	}
+	return ". " + strings.Join(timed, ", ") + " moves for a requested duration and then stops the camera itself; it is " +
+		"registered only when at least one camera sets ptz_honours_timeout and refuses any camera that does not. " +
+		"That setting is the operator's claim, not something this server can check, that the camera ends the move by " +
+		"itself when the ONVIF Timeout sent with it runs out: if this server is killed, runs out of memory or loses " +
+		"power mid-move, that Timeout is the only remaining protection. It also draws on continuous_motion_budget_per_camera " +
+		"and holds the camera busy until it has stopped it"
 }
 
 const whyText = "write tools physically move or reconfigure a real camera; an agent that loops on them " +
@@ -106,6 +134,7 @@ func (p *Policy) document(cams []CameraGrant) policyDoc {
 			"but has no dry run and is not rate limited: it is available whenever control is enabled and the camera opted in, " +
 			"so a stop is never held back by the movement rate limit"
 	}
+	explanation += timedText(p.TimedTools())
 	return policyDoc{
 		Mode:               mode,
 		ControlEnabled:     enabled,
@@ -113,6 +142,7 @@ func (p *Policy) document(cams []CameraGrant) policyDoc {
 		HaltTools:          halts,
 		Cameras:            grants,
 		RateLimitPerCamera: p.rateLimitText(),
+		MotionBudget:       p.motionBudgetText(),
 		HowToEnable:        howTo,
 		DryRunDefault:      true,
 		Explanation:        explanation,
@@ -129,6 +159,7 @@ func (p *Policy) readOnlyTransportDocument(cams []CameraGrant) policyDoc {
 		// The config-level opt-in map is the operator's, and no tool on this
 		// transport uses it, so it is not disclosed to remote callers.
 		c.ControlAllowed = false
+		c.PTZHonoursTimeout = false
 		grants = append(grants, c)
 	}
 	return policyDoc{
@@ -138,10 +169,11 @@ func (p *Policy) readOnlyTransportDocument(cams []CameraGrant) policyDoc {
 		HaltTools:          []string{},
 		Cameras:            grants,
 		RateLimitPerCamera: "not applicable: no movement is possible on this transport",
+		MotionBudget:       "not applicable: no movement is possible on this transport",
 		HowToEnable:        p.WritesUnavailable,
 		DryRunDefault:      true,
 		Explanation: "every tool offered on this transport is read-only; control_allowed is always false here " +
-			"because per-camera write opt-ins do not apply to a transport that offers no write tool",
+			"and so is ptz_honours_timeout, because per-camera write opt-ins do not apply to a transport that offers no write tool",
 		Why: whyText,
 	}
 }
