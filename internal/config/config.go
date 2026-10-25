@@ -63,6 +63,15 @@ type Camera struct {
 	// are unaffected. Set it only for a camera that offers nothing but Basic on
 	// a network you trust.
 	AllowBasicOverHTTP bool `json:"allow_basic_over_http,omitempty"`
+	// PTZHonoursTimeout is the operator's attestation that this camera ends a
+	// continuous PTZ move by itself when the ONVIF Timeout sent with it runs out.
+	// Defaults false. ptz.move_continuous exists only for cameras that set it,
+	// because after a crash, OOM kill or power loss of this server the camera's
+	// own Timeout is the only thing left that stops the motion. It is a claim
+	// about firmware that the server cannot check (onvif-go reads no PTZ node
+	// capabilities), earned by the hardware test TestHardwareTimeoutHonoured.
+	// It requires Control.
+	PTZHonoursTimeout bool `json:"ptz_honours_timeout,omitempty"`
 }
 
 // Timeout returns the configured per-camera timeout, defaulting to 10s.
@@ -173,6 +182,12 @@ func Load(path string) (*Config, error) {
 		}
 		if cam.TimeoutSeconds < 0 || cam.TimeoutSeconds > maxTimeoutSecs {
 			return nil, fmt.Errorf("camera %q timeout_seconds must be between 0 and %d", id, maxTimeoutSecs)
+		}
+		if cam.PTZHonoursTimeout && !cam.Control {
+			// The attestation only unlocks a write tool, so on its own it is a
+			// dormant claim that would silently take effect if control were
+			// turned on later. Refuse it instead.
+			return nil, fmt.Errorf("camera %q sets ptz_honours_timeout without \"control\": true; set both or neither", id)
 		}
 		if v, ok := os.LookupEnv(envKey(id)); ok {
 			if v == "" {

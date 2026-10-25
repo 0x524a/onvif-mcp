@@ -73,7 +73,10 @@ const (
 type Entry struct {
 	id      string
 	control bool
-	cred    *credentials
+	// honoursTimeout is the operator's ptz_honours_timeout attestation. It
+	// counts only together with control (HonoursTimeout).
+	honoursTimeout bool
+	cred           *credentials
 }
 
 // credentials is the camera's connection settings, including the password.
@@ -181,7 +184,7 @@ func New(cfg *config.Config) *Registry {
 		}
 		c := *cam
 		c.ID = id
-		r.entries[id] = &Entry{id: id, control: c.Control, cred: &credentials{cam: c}}
+		r.entries[id] = &Entry{id: id, control: c.Control, honoursTimeout: c.PTZHonoursTimeout, cred: &credentials{cam: c}}
 	}
 	return r
 }
@@ -364,6 +367,26 @@ func (e Entry) ID() string { return e.id }
 
 // ControlAllowed reports whether this camera opted in to write tools.
 func (e Entry) ControlAllowed() bool { return e.control }
+
+// HonoursTimeout reports whether the operator attests (ptz_honours_timeout) that
+// this camera ends a continuous move by itself when its ONVIF Timeout runs out.
+// It is false for a camera without control, whatever the config says:
+// config.Load refuses that combination, and the registry does not rely on it.
+func (e Entry) HonoursTimeout() bool { return e.control && e.honoursTimeout }
+
+// AnyHonoursTimeout reports whether at least one camera attests HonoursTimeout.
+// ptz.move_continuous is registered only when one does. No network call.
+func (r *Registry) AnyHonoursTimeout() bool {
+	if r == nil {
+		return false
+	}
+	for _, e := range r.entries {
+		if e.HonoursTimeout() {
+			return true
+		}
+	}
+	return false
+}
 
 // scrubbedError is an error whose text has already been through
 // redact.Scrub, while Unwrap keeps the original chain so errors.Is and
