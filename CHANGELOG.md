@@ -7,6 +7,21 @@ matching the pushed tag as the GitHub Release notes, so every tag needs a non-em
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-25
+
+### Fixed
+
+- `ptz.move_relative` failed on strict (gSOAP) cameras: onvif-go v1.2.0 wrote the `PanTilt` and `Zoom`
+  children of the move vector outside the ONVIF schema namespace, and a Reolink TrackMix answered every
+  move with `tag name namespace mismatch in element 'PanTilt'`. Fixed in onvif-go v1.2.1, which this
+  release requires. The same fix covers `AbsoluteMove` and `ContinuousMove` in the library.
+
+### Verified
+
+- The `hardware` tier passed on a physical camera for the first time: the read matrix on five cameras
+  (Axis, Reolink, three Bosch) and the relative nudge pair with `ptz.stop` on the Reolink TrackMix.
+  Preset moves (`ptz.goto_preset`) have still not been run on hardware.
+
 ## [0.2.0] - 2026-10-23
 
 Two gated PTZ tools over stdio and a read-only streamable HTTP transport. Not yet verified on a
@@ -136,6 +151,7 @@ inspection and guarded PTZ control as typed tools for an LLM agent.
 ONVIF events, continuous, relative or absolute PTZ, imaging or device writes, video serving, any
 transport but stdio, and verification on physical cameras.
 
-[Unreleased]: https://github.com/0x524a/onvif-mcp/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/0x524a/onvif-mcp/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/0x524a/onvif-mcp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/0x524a/onvif-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/0x524a/onvif-mcp/releases/tag/v0.1.0

@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/0x524A/rtspeek v0.2.0
-	github.com/0x524a/onvif-go v1.2.0
+	github.com/0x524a/onvif-go v1.2.1
 	github.com/bluenviron/gortsplib/v5 v5.5.0
 	github.com/bluenviron/mediacommon/v2 v2.9.3
 	github.com/google/jsonschema-go v0.4.3

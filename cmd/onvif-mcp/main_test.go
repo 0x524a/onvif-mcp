@@ -92,7 +92,7 @@ func runBin(t *testing.T, args ...string) (stdout, stderr string, code int) {
 
 func TestVersionGoesToStdout(t *testing.T) {
 	so, se, code := runBin(t, "-version")
-	if code != 0 || strings.TrimSpace(so) != "v0.2.0" || se != "" {
+	if code != 0 || strings.TrimSpace(so) != "v0.2.1" || se != "" {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, so, se)
 	}
 }

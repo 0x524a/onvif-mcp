@@ -1,7 +1,7 @@
 github.com/0x524A/rtspeek v0.2.0 h1:DMlrZOej8HQ37MCYr0TsxRINQ2HgZLWACRSswPAI/Zk=
 github.com/0x524A/rtspeek v0.2.0/go.mod h1:gy+QwmyzOYgCas60ldXVKH7L3ETF5/UsnUC0WcJkz9g=
-github.com/0x524a/onvif-go v1.2.0 h1:Voz07KvwqqUmb3VgdGA/cl4dDpy14ZcyFjXW/q1jySw=
-github.com/0x524a/onvif-go v1.2.0/go.mod h1:JGl4L69QaaEFSOr9pnLJ9froZdvOJg+KCnWKcNdk7jg=
+github.com/0x524a/onvif-go v1.2.1 h1:7PfF8uh8spUCaQLEDH6/FheaN6H9DLgdUUFroAaAoGE=
+github.com/0x524a/onvif-go v1.2.1/go.mod h1:JGl4L69QaaEFSOr9pnLJ9froZdvOJg+KCnWKcNdk7jg=
 github.com/bluenviron/gortsplib/v5 v5.5.0 h1:2wlUKhlSw1ptKEVnkEuZMpQuN8Xt311Fdd/SB124JPA=
 github.com/bluenviron/gortsplib/v5 v5.5.0/go.mod h1:otcPqR836QZej/EYx7njn8vl4TLj8Ya3QAf+GBwh2cQ=
 github.com/bluenviron/mediacommon/v2 v2.9.3 h1:cT52JxFnOG2EvI8Imp0sy0NZI773Id+QmY3eOEryR9Y=
