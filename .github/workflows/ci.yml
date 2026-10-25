@@ -99,3 +99,10 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: go build -trimpath -o /dev/null ./cmd/onvif-mcp
+      - name: vet ${{ matrix.goos }}/${{ matrix.goarch }}
+        # Catches test files that only build on one OS (a syscall that does not
+        # exist on windows).
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go vet ./...

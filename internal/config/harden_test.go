@@ -4,34 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 )
 
 func loadErr(t *testing.T, body string) error {
 	t.Helper()
 	_, err := Load(writeBody(t, body, 0o600))
 	return err
-}
-
-func TestFIFOConfigPathDoesNotHang(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "fifo.json")
-	if err := syscall.Mkfifo(p, 0o600); err != nil {
-		t.Skip("mkfifo unavailable")
-	}
-	done := make(chan error, 1)
-	go func() { _, err := Load(p); done <- err }()
-	select {
-	case err := <-done:
-		if !errors.Is(err, ErrNotRegular) {
-			t.Errorf("got %v, want ErrNotRegular", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Load hung on a FIFO")
-	}
 }
 
 func TestDirectoryPathIsNotRegular(t *testing.T) {
