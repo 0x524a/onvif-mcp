@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -496,6 +497,32 @@ func TestPTZStopDuringAHungSendStopsAtOnce(t *testing.T) {
 		t.Fatalf("own stops = %d", len(own))
 	}
 	if s := r.records(t, "motion stopped"); len(s) != 1 || s[0]["stopped_by"] != "ptz.stop" {
+		t.Errorf("audit = %v", s)
+	}
+}
+
+// A camera that lists a PTZ profile but advertises no PTZ service: onvif-go
+// refuses the move before any request, so nothing moved and no stop can or need
+// be sent. That must not be reported as MOTION MAY CONTINUE.
+func TestContinuousOnACameraWithoutAPTZServiceIsNotSupportedNotMotionMayContinue(t *testing.T) {
+	fx := newPtzFx(t)
+	fx.on("GetCapabilities", func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool {
+		_, _ = fmt.Fprintf(w, envelope, `<tds:GetCapabilitiesResponse xmlns:tds="http://www.onvif.org/ver10/device/wsdl"><tds:Capabilities>`+
+			`<tt:Media xmlns:tt="http://www.onvif.org/ver10/schema"><tt:XAddr>`+fx.srv.URL+`/media</tt:XAddr></tt:Media>`+
+			`</tds:Capabilities></tds:GetCapabilitiesResponse>`)
+		return true
+	})
+	r := newContRig(t, fx, contOpts{attest: true, burst: 1})
+	instantTimer(t)
+	res := r.move(t, map[string]any{"dry_run": false})
+	code, _ := errCode(t, res)
+	if code != "not_supported" || strings.Contains(wire(t, res), "MOTION MAY CONTINUE") || strings.Contains(wire(t, res), "may or may not") {
+		t.Fatalf("%s", wire(t, res))
+	}
+	if fx.count("ContinuousMove")+fx.count("Stop") != 0 {
+		t.Fatalf("ops = %+v", fx.all())
+	}
+	if s := r.records(t, "motion stopped"); len(s) != 1 || s[0]["stopped_by"] != "not_sent" || s[0]["level"] != "INFO" {
 		t.Errorf("audit = %v", s)
 	}
 }

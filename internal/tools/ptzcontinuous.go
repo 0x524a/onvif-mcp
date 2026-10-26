@@ -85,6 +85,9 @@ const (
 	stoppedShutdown   = "shutdown"
 	stoppedSendFailed = "send_failed"
 	stoppedPanic      = "panic"
+	// stoppedNotSent: onvif-go refused the move before any request (the camera
+	// advertises no PTZ service), so nothing moved and there is nothing to stop.
+	stoppedNotSent = "not_sent"
 )
 
 // MoveContinuousIn is the input of ptz.move_continuous. Every axis is a pointer
@@ -472,6 +475,13 @@ func moveContinuousRun(d Deps) mcp.ToolHandlerFor[MoveContinuousIn, mcperr.Out[C
 		defer func() {
 			// Runs on every exit past this point, panics included. It must stay
 			// the first thing this handler does on the way out.
+			if stoppedBy == stoppedNotSent {
+				d.Policy.AuditMotionStopped(moveContinuousTool, in.Camera, id, stoppedBy, "not_needed", true)
+				te := mcperr.FromError(sendErr, in.Camera, moveContinuousOp)
+				te.NotSent = true
+				res, out, err = fail[ContinuousData](te)
+				return
+			}
 			s := stopMotion(ctx, plan.c, in.Camera, in.Profile)
 			d.Policy.AuditMotionStopped(moveContinuousTool, in.Camera, id, stoppedBy, s.status, s.status != stopFailed)
 			res, out, err = continuousResult(in, plan, stoppedBy, sendErr, s)
@@ -497,8 +507,13 @@ func moveContinuousRun(d Deps) mcp.ToolHandlerFor[MoveContinuousIn, mcperr.Out[C
 			afterContinuousSend()
 		}
 		if sendErr != nil {
-			// An ambiguous send counts as sent: stop at once.
+			// An ambiguous send counts as sent: stop at once. The one exception is
+			// onvif-go's own refusal before any request: its PTZ endpoint getter
+			// returns these sentinels unwrapped, before the SOAP call (ptz.go,
+			// getPTZEndpoint), so nothing can have reached the camera.
 			switch {
+			case errors.Is(sendErr, onvif.ErrServiceNotSupported), errors.Is(sendErr, onvif.ErrNotInitialized):
+				stoppedBy = stoppedNotSent
 			case isClosed(lease.Interrupted()):
 				stoppedBy = stoppedByStop
 			case ctx.Err() != nil:
@@ -559,7 +574,7 @@ func continuousResult(in MoveContinuousIn, plan *continuousPlan, stoppedBy strin
 		te.Message = "MOTION MAY CONTINUE on camera " + in.Camera + ": the server could not deliver its stop " + what +
 			": " + s.te.Message
 		te.Hint = "call ptz.stop now and repeat until it succeeds; the camera was also sent an ONVIF Timeout of " +
-			plan.data.CameraTimeout + ", which its operator attests it honours; if ptz.stop keeps failing, tell an operator"
+			plan.data.CameraTimeout + ", which its operator attests it honours; if ptz.stop keeps failing, tell an operator."
 		return fail[ContinuousData](&te)
 	}
 	if sendErr != nil {
