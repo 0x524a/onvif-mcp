@@ -429,3 +429,26 @@ func TestContinuousRealMoveSendsOneMoveThenItsOwnStopAtTheDeadline(t *testing.T)
 		t.Errorf("started=%v stopped=%v", started, stopped)
 	}
 }
+
+// FuzzONVIFTimeout: for every duration the validator accepts, the Timeout is a
+// plain xs:duration that is never shorter than the duration (to the
+// microsecond) and at most one millisecond longer.
+func FuzzONVIFTimeout(f *testing.F) {
+	for _, s := range []float64{0.5, 1, 1.5, 2.3, 4.9999, 5, 0.5000001, 3.14159} {
+		f.Add(s)
+	}
+	re := regexp.MustCompile(`^PT[0-9]+(\.[0-9]{1,3})?S$`)
+	f.Fuzz(func(t *testing.T, d float64) {
+		if math.IsNaN(d) || d < minContinuousSeconds || d > maxContinuousSeconds {
+			return
+		}
+		got := onvifTimeout(d)
+		if !re.MatchString(got) {
+			t.Fatalf("onvifTimeout(%v) = %q", d, got)
+		}
+		secs, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimPrefix(got, "PT"), "S"), 64)
+		if err != nil || secs < d-0.5e-6 || secs > d+0.001+1e-9 {
+			t.Fatalf("onvifTimeout(%v) = %q", d, got)
+		}
+	})
+}
