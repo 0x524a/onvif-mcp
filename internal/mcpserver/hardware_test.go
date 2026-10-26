@@ -443,21 +443,29 @@ func hwContinuousSpec(t *testing.T) (camID, profile string) {
 //
 // It skips unless ONVIF_MCP_HW_CONTINUOUS is exactly <camera-id>:<profile-token>.
 // The OPERATOR must confirm, before setting it, that the camera may pan slowly
-// for a few seconds from where it is now (clear of people, cabling and
+// for a few seconds each way from where it is now (clear of people, cabling and
 // obstructions, not near a pan limit) and that nobody depends on its view.
 //
-// It bypasses the server on purpose: through onvif-go directly it sends one
+// It bypasses the server on purpose: through onvif-go directly it sends a
 // ContinuousMove with a small pan velocity in the generic velocity space (the
-// space ptz.move_continuous sends) and an ONVIF Timeout of PT2S, and then does
-// NOT send Stop. It polls GetStatus for up to 5 s. It passes only if the camera
-// reported MOVING and then, after at least 1 s, stopped by itself. A camera that
-// keeps moving fails; a camera that reports no movement state, never reports
-// MOVING, or stops within the first second (a pan limit, say) is inconclusive,
-// which also fails: none of those is evidence. A deferred Stop always runs
-// afterwards, so a failing camera is still stopped.
+// space ptz.move_continuous sends) and an ONVIF Timeout, and then does NOT send
+// Stop; it polls GetStatus for up to 5 s. It does so twice, in the two
+// fractional forms the tool sends (a millisecond-rounded xs:duration):
 //
-// A pass is evidence about this camera and firmware only. Re-run it after a
-// firmware update. The attestation stays the operator's claim.
+//  1. PT1.5S at +pan. It must report MOVING after at least 1 s and then IDLE by
+//     itself, which rules out a camera that merely ran into a pan limit.
+//  2. PT0.5S at -pan (back the other way). It must report MOVING and then IDLE
+//     by itself; a camera that reads a sub-second Timeout as zero, and zero as
+//     "no timeout", fails here.
+//
+// A camera that keeps moving fails; one that reports no movement state, never
+// reports MOVING, stops too early in run 1 or ends UNKNOWN is inconclusive,
+// which also fails: none of those is evidence. A deferred Stop always runs, so a
+// failing camera is still stopped.
+//
+// A pass is evidence about this camera and firmware only, at this test's
+// velocity. Re-run it after a firmware update. The attestation stays the
+// operator's claim.
 func TestHardwareTimeoutHonoured(t *testing.T) {
 	camID, profile := hwContinuousSpec(t)
 	cfg := hwConfig(t)
@@ -468,7 +476,7 @@ func TestHardwareTimeoutHonoured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	c, err := e.Client(ctx)
 	if err != nil {
@@ -495,16 +503,37 @@ func TestHardwareTimeoutHonoured(t *testing.T) {
 		}
 	}()
 
-	const sent = "PT2S"
-	timeout := sent
-	vel := &onvif.PTZSpeed{PanTilt: &onvif.Vector2D{X: 0.1, Y: 0,
+	for i, run := range []struct {
+		timeout   string
+		pan       float64
+		minMoving time.Duration // the camera must still be MOVING this long after the send
+	}{
+		{"PT1.5S", 0.1, time.Second},
+		{"PT0.5S", -0.1, 0},
+	} {
+		if i > 0 {
+			time.Sleep(2 * time.Second) // let the first run settle
+		}
+		stoppedAt := hwTimeoutRun(ctx, t, c, camID, profile, run.timeout, run.pan, run.minMoving)
+		t.Logf("run %d: the camera stopped by itself %v after a ContinuousMove with Timeout %s and no Stop",
+			i+1, stoppedAt.Round(100*time.Millisecond), run.timeout)
+	}
+	t.Logf("PASS: you may set \"ptz_honours_timeout\": true for %s; re-run this after any firmware update.", camID)
+}
+
+// hwTimeoutRun sends one ContinuousMove with the given Timeout and no Stop, and
+// returns when the camera reported IDLE by itself after MOVING. It fails the
+// test (FAILED or INCONCLUSIVE) otherwise.
+func hwTimeoutRun(ctx context.Context, t *testing.T, c *onvif.Client, camID, profile, timeout string, pan float64, minMoving time.Duration) time.Duration {
+	t.Helper()
+	sent := timeout
+	vel := &onvif.PTZSpeed{PanTilt: &onvif.Vector2D{X: pan, Y: 0,
 		Space: "http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace"}}
 	start := time.Now()
-	if err := c.ContinuousMove(ctx, profile, vel, &timeout); err != nil {
-		t.Fatalf("ContinuousMove: %s (the camera may or may not be moving; the deferred Stop runs now)",
-			mcperr.FromError(err, camID, "ContinuousMove").Code)
+	if err := c.ContinuousMove(ctx, profile, vel, &sent); err != nil {
+		t.Fatalf("ContinuousMove (%s): %s (the camera may or may not be moving; the deferred Stop runs now)",
+			timeout, mcperr.FromError(err, camID, "ContinuousMove").Code)
 	}
-
 	var sawState, sawMoving, lastWasMoving bool
 	var lastMoving, stoppedAt time.Duration
 	for time.Since(start) < 5*time.Second {
@@ -532,26 +561,23 @@ func TestHardwareTimeoutHonoured(t *testing.T) {
 			break
 		}
 	}
+	const notAttested = "this is not an attestation: do not set ptz_honours_timeout"
 	switch {
 	case !sawState:
-		t.Fatal("INCONCLUSIVE: the camera reports no movement state, so whether it honours the Timeout cannot be seen; " +
-			"this is not an attestation: do not set ptz_honours_timeout")
+		t.Fatalf("INCONCLUSIVE (%s): the camera reports no movement state, so whether it honours the Timeout cannot be seen; %s", timeout, notAttested)
 	case !sawMoving:
-		t.Fatal("INCONCLUSIVE: the camera never reported MOVING, so the move may not have started; " +
-			"this is not an attestation: do not set ptz_honours_timeout")
+		t.Fatalf("INCONCLUSIVE (%s): the camera never reported MOVING, so the move may not have started; %s", timeout, notAttested)
 	case stoppedAt == 0 && !lastWasMoving:
-		t.Fatal("INCONCLUSIVE: after MOVING the camera never reported IDLE within 5 s (it reported UNKNOWN or no " +
-			"status could be read); this is not an attestation: do not set ptz_honours_timeout")
+		t.Fatalf("INCONCLUSIVE (%s): after MOVING the camera never reported IDLE within 5 s (it reported UNKNOWN or no "+
+			"status could be read); %s", timeout, notAttested)
 	case stoppedAt == 0:
-		t.Fatalf("FAILED: the camera still reported MOVING %v after a ContinuousMove with Timeout %s and no Stop; "+
-			"it does not honour the ONVIF Timeout: do NOT set ptz_honours_timeout for this camera", lastMoving.Round(100*time.Millisecond), sent)
-	case lastMoving < time.Second:
-		t.Fatalf("INCONCLUSIVE: the camera stopped %v after the send, before the %s Timeout could matter (a pan limit?); "+
-			"move it away from its limits and run again; do not set ptz_honours_timeout on this result", stoppedAt.Round(100*time.Millisecond), sent)
+		t.Fatalf("FAILED (%s): the camera still reported MOVING %v after a ContinuousMove with this Timeout and no Stop; "+
+			"it does not honour the ONVIF Timeout: do NOT set ptz_honours_timeout for this camera", timeout, lastMoving.Round(100*time.Millisecond))
+	case lastMoving < minMoving:
+		t.Fatalf("INCONCLUSIVE (%s): the camera stopped %v after the send, before the Timeout could matter (a pan limit?); "+
+			"move it away from its limits and run again; %s", timeout, stoppedAt.Round(100*time.Millisecond), notAttested)
 	}
-	t.Logf("PASS: the camera stopped by itself %v after a ContinuousMove with Timeout %s and no Stop. "+
-		"You may set \"ptz_honours_timeout\": true for %s; re-run this after any firmware update.",
-		stoppedAt.Round(100*time.Millisecond), sent, camID)
+	return stoppedAt
 }
 
 // TestHardwareContinuousMove runs ptz.move_continuous through the server on a

@@ -43,11 +43,10 @@ func TestLeaseTryAcquireIsExclusivePerKeyUnderRace(t *testing.T) {
 func TestLeaseRetryComesFromTheHoldersDeadline(t *testing.T) {
 	clk := newFakeClock()
 	ls := NewLeases(clk.Now)
-	l, _ := ls.TryAcquire("dev")
+	l, _ := ls.tryAcquire("dev", true)
 	if _, wait := ls.TryAcquire("dev"); wait != time.Second {
-		t.Errorf("a short write holder: wait = %v, want 1s", wait)
+		t.Errorf("a timed holder before its deadline is set: wait = %v, want 1s", wait)
 	}
-	l.markTimed()
 	l.SetUntil(clk.Now().Add(3500 * time.Millisecond))
 	if _, wait := ls.TryAcquire("dev"); wait < 3500*time.Millisecond || wait > 5*time.Second {
 		t.Errorf("a timed holder 3.5s from its deadline: wait = %v", wait)
@@ -101,8 +100,7 @@ func TestLeaseInterruptWakesOnlyATimedMotion(t *testing.T) {
 	}
 	short.Release()
 
-	timed, _ := ls.TryAcquire("dev")
-	timed.markTimed()
+	timed, _ := ls.tryAcquire("dev", true)
 	timed.SetUntil(time.Now().Add(time.Second))
 	if !ls.Interrupt("dev") {
 		t.Error("Interrupt must report a timed motion")
@@ -136,8 +134,9 @@ func TestLeasesNilIsSafe(t *testing.T) {
 // ptz.stop arriving during validation would be overtaken by the move.
 func TestInterruptBeforeTheMotionStartsCancelsIt(t *testing.T) {
 	ls := NewLeases(nil)
-	l, _ := ls.TryAcquire("dev")
-	l.markTimed()
+	// Timed from the moment it is granted: no window in which an Interrupt is
+	// lost between acquiring the lease and marking it.
+	l, _ := ls.tryAcquire("dev", true)
 	if !ls.Interrupt("dev") {
 		t.Fatal("a pending timed motion must count as interrupted")
 	}
@@ -146,8 +145,7 @@ func TestInterruptBeforeTheMotionStartsCancelsIt(t *testing.T) {
 	}
 	l.Release()
 
-	l, _ = ls.TryAcquire("dev")
-	l.markTimed()
+	l, _ = ls.tryAcquire("dev", true)
 	if !l.SetUntil(time.Now().Add(time.Second)) {
 		t.Fatal("an uninterrupted motion may start")
 	}

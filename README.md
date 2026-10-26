@@ -528,8 +528,9 @@ sets `"ptz_honours_timeout": true` (with `-enable-control` and `"control": true`
 naming any other camera is refused with `blocked_by_policy`, dry runs included.
 `ptz_honours_timeout` is the operator's claim about the camera's firmware, not something the
 server checks. Earn it with the hardware test `TestHardwareTimeoutHonoured` (see "Hardware tests"
-below), which sends a move with a 2 second `Timeout` and no stop and passes only if the camera
-stops by itself; re-run it after a firmware update.
+below), which sends moves with the fractional `Timeout`s the tool sends (`PT1.5S`, then `PT0.5S`)
+and no stop, and passes only if the camera stops by itself each time; re-run it after a firmware
+update.
 
 It takes `camera`, `profile` (a token from `media.profiles` with `has_ptz` true), `dry_run`,
 any of `pan`, `tilt`, `zoom`, and the required `duration_seconds`.
@@ -705,13 +706,14 @@ out the per-device rate limit, sends -0.05, and always ends with `ptz.stop`. It 
 against hardware, and it cannot judge whether the camera is free to move a little each way.
 
 `ONVIF_MCP_HW_CONTINUOUS=<camera-id>:<profile-token>` runs the `ptz_honours_timeout` proof,
-`TestHardwareTimeoutHonoured`. It bypasses the server: through the client library it sends one
-`ContinuousMove` with a small pan velocity and a `Timeout` of 2 seconds, sends **no** `Stop`, and
-polls the status for 5 seconds. It passes only if the camera reported `MOVING` and then, after at
-least a second, `IDLE` by itself. A camera that keeps moving fails ("do NOT set
-ptz_honours_timeout"); one that reports no movement state, never reports `MOVING`, stops within the
-first second or ends `UNKNOWN` is inconclusive, which is not an attestation either. A stop is
-always sent at the end. The camera must be clear to pan slowly for a few seconds and not near a
+`TestHardwareTimeoutHonoured`. It bypasses the server: through the client library it sends a
+`ContinuousMove` with a small pan velocity and a `Timeout`, sends **no** `Stop`, and polls the
+status for 5 seconds; twice, in the fractional forms the tool sends: `PT1.5S` one way (the camera
+must still be `MOVING` after a second, which rules out a pan limit, then `IDLE` by itself), then
+`PT0.5S` back (a camera that reads a sub-second `Timeout` as no timeout fails here). A camera that
+keeps moving fails ("do NOT set ptz_honours_timeout"); one that reports no movement state, never
+reports `MOVING`, stops too early or ends `UNKNOWN` is inconclusive, which is not an attestation
+either. A stop is always sent at the end. The camera must be clear to pan slowly for a few seconds and not near a
 pan limit. With the same variable, `TestHardwareContinuousMove` runs `ptz.move_continuous` through
 the server for one second, but only for a camera whose config already sets
 `ptz_honours_timeout`. Neither has been run against hardware.

@@ -24,8 +24,9 @@ matching the pushed tag as the GitHub Release notes, so every tag needs a non-em
   `Timeout` is the only thing left that stops the camera, and the server cannot check the claim.
 - A per-device budget of seconds of motion for `ptz.move_continuous` (5 s, one second regained per
   4 s), charged in full before each move is sent and never refunded.
-- Opt-in hardware tests `TestHardwareTimeoutHonoured` (the attestation proof: a move with a 2 s
-  `Timeout` and no stop must end by itself) and `TestHardwareContinuousMove`, behind the `hardware`
+- Opt-in hardware tests `TestHardwareTimeoutHonoured` (the attestation proof: moves with the
+  fractional `Timeout`s the tool sends, `PT1.5S` and `PT0.5S`, and no stop must each end by
+  themselves) and `TestHardwareContinuousMove`, behind the `hardware`
   build tag and `ONVIF_MCP_HW_CONTINUOUS=<camera-id>:<profile-token>`. Neither has been run.
 - Audit records `motion started` and `motion stopped`, paired by a server-generated `motion_id`.
 

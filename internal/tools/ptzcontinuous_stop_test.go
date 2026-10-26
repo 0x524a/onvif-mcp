@@ -56,6 +56,9 @@ func TestContinuousStopThatNeverLandsSaysMotionMayContinue(t *testing.T) {
 	if _, hint := errCode(t, res); !strings.Contains(hint, "ptz.stop") || !strings.Contains(hint, "PT1.5S") {
 		t.Errorf("hint = %q", hint)
 	}
+	if strings.Contains(wire(t, res), "was stopped") {
+		t.Error("a failed stop must never read as stopped")
+	}
 	if fx.count("Stop") != 3 {
 		t.Errorf("Stop attempts = %d, want 3", fx.count("Stop"))
 	}
@@ -163,8 +166,13 @@ func TestContinuousPanicAfterTheSendStillStopsAndReleasesTheDevice(t *testing.T)
 	instantTimer(t)
 	afterContinuousSend = func() { panic("boom password=hunter2-secret") }
 	res := r.move(t, map[string]any{"dry_run": false})
-	if code, _ := errCode(t, res); code != "internal" || strings.Contains(wire(t, res), "hunter2") {
+	code, hint := errCode(t, res)
+	if code != "internal" || strings.Contains(wire(t, res), "hunter2") {
 		t.Fatalf("%s", wire(t, res))
+	}
+	// The agent learns that the move was sent and what the server's stop did.
+	if !strings.Contains(hint, "ptz.stop") || !strings.Contains(wire(t, res), "confirmed_idle") {
+		t.Errorf("a panic past the send must report the stop and point at ptz.stop: %s", wire(t, res))
 	}
 	if fx.count("Stop") != 1 {
 		t.Fatalf("Stop = %d after a panic past the send", fx.count("Stop"))
@@ -466,6 +474,11 @@ func TestAHungSendIsAbandonedAtTheDeadlineAndStopped(t *testing.T) {
 	if !res.IsError || !strings.Contains(wire(t, res), "did not answer") {
 		t.Fatalf("%s", wire(t, res))
 	}
+	// The abandoned request may still be acted on after the stop; its Timeout
+	// then ends it, and the agent is told to check.
+	if _, hint := errCode(t, res); !strings.Contains(hint, "PT0.5S") || !strings.Contains(hint, "late") {
+		t.Errorf("hint = %q", hint)
+	}
 	moves, stops := fx.named("ContinuousMove"), fx.named("Stop")
 	if len(moves) != 1 || len(stops) != 1 {
 		t.Fatalf("moves=%d stops=%d", len(moves), len(stops))
@@ -524,5 +537,34 @@ func TestContinuousOnACameraWithoutAPTZServiceIsNotSupportedNotMotionMayContinue
 	}
 	if s := r.records(t, "motion stopped"); len(s) != 1 || s[0]["stopped_by"] != "not_sent" || s[0]["level"] != "INFO" {
 		t.Errorf("audit = %v", s)
+	}
+}
+
+// When the move command itself failed, the camera may never have received it,
+// so the hint must not claim it was sent a Timeout.
+func TestMotionMayContinueAfterAFailedSendDoesNotClaimTheTimeoutArrived(t *testing.T) {
+	fx := newPtzFx(t)
+	fx.on("ContinuousMove", func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool { dropConn(w); return true })
+	fx.on("Stop", func(_ int, w http.ResponseWriter, _ *http.Request, _ string) bool { dropConn(w); return true })
+	r := newContRig(t, fx, contOpts{attest: true})
+	instantTimer(t)
+	res := r.move(t, map[string]any{"dry_run": false})
+	_, hint := errCode(t, res)
+	if !strings.Contains(wire(t, res), "MOTION MAY CONTINUE") || !strings.Contains(hint, "if the camera received") {
+		t.Fatalf("%s", wire(t, res))
+	}
+}
+
+func TestAnUnconfirmedStopIsNotSummarisedAsStopped(t *testing.T) {
+	fx := newPtzFx(t)
+	fx.setStatus(`<tt:PanTilt>MOVING</tt:PanTilt>`)
+	r := newContRig(t, fx, contOpts{attest: true})
+	instantTimer(t)
+	res := r.move(t, map[string]any{"dry_run": false})
+	if d := dataMap(t, res); d["stop_status"] != "sent_unconfirmed" {
+		t.Fatalf("data = %v", d)
+	}
+	if txt := res.Content[0].(*mcp.TextContent).Text; strings.Contains(txt, "was stopped") || !strings.Contains(txt, "not confirmed") {
+		t.Errorf("summary = %q", txt)
 	}
 }

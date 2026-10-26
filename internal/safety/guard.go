@@ -374,7 +374,9 @@ func (p *Policy) Evaluate(ctx context.Context, camera, tool string, dryRun bool,
 			"no device lease table is configured, so movement is refused", nil, misconfiguredHint), ReasonNoLeases)
 	}
 	key := entry.DeviceKey()
-	lease, busyFor := p.Leases.TryAcquire(key)
+	// Only timed motions need the attestation; their lease is interruptible by
+	// ptz.stop from the moment it is granted, before the move is sent.
+	lease, busyFor := p.Leases.tryAcquire(key, o.requireAttestation)
 	if lease == nil {
 		secs := int(math.Ceil(busyFor.Seconds()))
 		return refuse(blocked(camera, tool,
@@ -390,11 +392,6 @@ func (p *Policy) Evaluate(ctx context.Context, camera, tool string, dryRun bool,
 		return refuse(blocked(camera, tool,
 			"movement is rate limited to protect the camera's mechanism", &secs,
 			"wait retry_after_seconds, then repeat the call"), ReasonRateLimited)
-	}
-	if o.requireAttestation {
-		// Only timed motions need the attestation; their lease can be
-		// interrupted by ptz.stop from the start, before the move is sent.
-		lease.markTimed()
 	}
 	return Decision{Refund: func() { p.Limiter.RefundGrant(key, grant) }, Lease: lease}
 }

@@ -61,6 +61,13 @@ func NewLeases(now func() time.Time) *Leases {
 // motion deadline for a timed holder, rounded up to whole seconds, plus one
 // second for its stop; shortWriteRetry otherwise. A nil Leases grants nothing.
 func (ls *Leases) TryAcquire(key string) (*Lease, time.Duration) {
+	return ls.tryAcquire(key, false)
+}
+
+// tryAcquire is TryAcquire; timed grants a lease that is a timed motion from
+// the start, under the same lock, so no Interrupt can fall between granting it
+// and marking it.
+func (ls *Leases) tryAcquire(key string, timed bool) (*Lease, time.Duration) {
 	if ls == nil {
 		return nil, shortWriteRetry
 	}
@@ -75,7 +82,7 @@ func (ls *Leases) TryAcquire(key string) (*Lease, time.Duration) {
 		}
 		return nil, wait
 	}
-	l := &Lease{ls: ls, key: key, interrupt: make(chan struct{})}
+	l := &Lease{ls: ls, key: key, timed: timed, interrupt: make(chan struct{})}
 	ls.held[key] = l
 	return l, 0
 }
@@ -105,15 +112,6 @@ func (ls *Leases) heldCount() int {
 	ls.mu.Lock()
 	defer ls.mu.Unlock()
 	return len(ls.held)
-}
-
-// markTimed makes the lease interruptible before its deadline is known. Evaluate
-// calls it for a tool that needs the timeout attestation, which is exactly the
-// set of timed motions.
-func (l *Lease) markTimed() {
-	l.ls.mu.Lock()
-	defer l.ls.mu.Unlock()
-	l.timed = true
 }
 
 // SetUntil records that the timed motion holding the lease is about to start

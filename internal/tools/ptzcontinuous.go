@@ -9,6 +9,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	onvif "github.com/0x524a/onvif-go"
@@ -474,7 +475,11 @@ func moveContinuousRun(d Deps) mcp.ToolHandlerFor[MoveContinuousIn, mcperr.Out[C
 		var sendErr error
 		defer func() {
 			// Runs on every exit past this point, panics included. It must stay
-			// the first thing this handler does on the way out.
+			// the first thing this handler does on the way out. A panic is
+			// recovered here, after which the stop still runs, so the agent learns
+			// what the stop did. The panic value is neither logged nor returned: it
+			// can carry anything the handler held.
+			panicked := recover() != nil
 			if stoppedBy == stoppedNotSent {
 				d.Policy.AuditMotionStopped(moveContinuousTool, in.Camera, id, stoppedBy, "not_needed", true)
 				te := mcperr.FromError(sendErr, in.Camera, moveContinuousOp)
@@ -484,6 +489,14 @@ func moveContinuousRun(d Deps) mcp.ToolHandlerFor[MoveContinuousIn, mcperr.Out[C
 			}
 			s := stopMotion(ctx, plan.c, in.Camera, in.Profile)
 			d.Policy.AuditMotionStopped(moveContinuousTool, in.Camera, id, stoppedBy, s.status, s.status != stopFailed)
+			if panicked && s.status != stopFailed {
+				res, out, err = fail[ContinuousData](&mcperr.ToolError{
+					Code: mcperr.CodeInternal, Camera: in.Camera, Operation: moveContinuousOp,
+					Message: "the tool failed unexpectedly after the move command was sent; the server then sent its stop: " + s.status,
+					Hint:    "call ptz.stop now, then check ptz.status or camera.snapshot; do not retry in a loop, and report this to the operator",
+				})
+				return
+			}
 			res, out, err = continuousResult(in, plan, stoppedBy, sendErr, s)
 		}()
 
@@ -491,7 +504,10 @@ func moveContinuousRun(d Deps) mcp.ToolHandlerFor[MoveContinuousIn, mcperr.Out[C
 		// interrupt, so a camera that never answers it cannot hold the server's
 		// stop back until the camera's request timeout.
 		sendCtx, cancelSend := context.WithDeadline(ctx, deadline)
+		defer cancelSend()
 		watched := make(chan struct{})
+		unwatch := sync.OnceFunc(func() { close(watched) })
+		defer unwatch() // also on a panic in the send, so the watcher never leaks
 		go func() {
 			select {
 			case <-lease.Interrupted():
@@ -501,7 +517,7 @@ func moveContinuousRun(d Deps) mcp.ToolHandlerFor[MoveContinuousIn, mcperr.Out[C
 		}()
 		sendErr = plan.c.ContinuousMove(sendCtx, in.Profile, v, &timeout)
 		sendExpired := errors.Is(sendCtx.Err(), context.DeadlineExceeded)
-		close(watched)
+		unwatch()
 		cancelSend()
 		if afterContinuousSend != nil {
 			afterContinuousSend()
@@ -573,18 +589,27 @@ func continuousResult(in MoveContinuousIn, plan *continuousPlan, stoppedBy strin
 		}
 		te.Message = "MOTION MAY CONTINUE on camera " + in.Camera + ": the server could not deliver its stop " + what +
 			": " + s.te.Message
-		te.Hint = "call ptz.stop now and repeat until it succeeds; the camera was also sent an ONVIF Timeout of " +
+		sent := "the camera was also sent"
+		if sendErr != nil {
+			sent = "if the camera received the move, it was also sent"
+		}
+		te.Hint = "call ptz.stop now and repeat until it succeeds; " + sent + " an ONVIF Timeout of " +
 			plan.data.CameraTimeout + ", which its operator attests it honours; if ptz.stop keeps failing, tell an operator."
 		return fail[ContinuousData](&te)
 	}
 	if sendErr != nil {
 		te := mcperr.FromError(sendErr, in.Camera, moveContinuousOp)
+		// An abandoned request may still reach the camera and be acted on after
+		// the server's stop; the Timeout it carries then ends it.
+		late := "If the camera acts on the abandoned move late, the ONVIF Timeout it carries (" + plan.data.CameraTimeout +
+			") ends it; check ptz.status, and call ptz.stop if it moves."
 		switch stoppedBy {
 		case stoppedDeadline:
 			te.Message = "the camera did not answer the move command within duration_seconds, so the server abandoned it"
-			te.Hint = "if this camera is slow to answer, use a longer duration_seconds"
+			te.Hint = "if this camera is slow to answer, use a longer duration_seconds. " + late
 		case stoppedByStop:
 			te.Message = "ptz.stop was called while the camera had not yet answered the move command, so the server abandoned it"
+			te.Hint = late
 		}
 		te.Message += "; the server then sent its stop: " + s.status
 		if te.SOAP != nil {
@@ -600,7 +625,7 @@ func continuousResult(in MoveContinuousIn, plan *continuousPlan, stoppedBy strin
 	data.Note = stopDoneNote(stoppedBy, s)
 	msg := "Continuous move ran and was stopped (" + stoppedBy + "); camera reports idle."
 	if s.status != stopConfirmedIdle {
-		msg = "Continuous move ran and was stopped (" + stoppedBy + "); stop not confirmed, check ptz.status."
+		msg = "Continuous move ran; the server sent its stop (" + stoppedBy + ") but it is not confirmed: check ptz.status."
 	}
 	return text(msg), mcperr.OK(data), nil
 }
