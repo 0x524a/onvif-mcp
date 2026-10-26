@@ -34,6 +34,12 @@ New in v0.2: two more gated tools, `ptz.move_relative` and `ptz.stop`, and a
 **read-only streamable HTTP transport** (`-transport http`, see
 [Serving over HTTP](#serving-over-http)). Write tools are not offered over HTTP at all.
 
+Unreleased: `ptz.move_continuous`, a timed sweep that the server stops itself. It exists only
+for cameras whose operator attests, with `"ptz_honours_timeout": true`, that the camera also
+stops by itself when the ONVIF `Timeout` runs out (see [ptz.move_continuous](#ptzmove_continuous)).
+It has been exercised only against the virtual camera, which ignores that `Timeout`; the hardware
+test that earns the attestation has not been run on any camera yet.
+
 ## Quick start
 
 No camera needed. This starts a virtual ONVIF camera and the server together, and you
@@ -95,6 +101,7 @@ checksums.
 | `ptz.presets` | Stored presets and reported movement limits | read-only |
 | `ptz.goto_preset` | Move a camera to a stored preset | write, gated (see below) |
 | `ptz.move_relative` | Nudge a camera by a small relative amount (at most 0.25 per axis per call) | write, gated (see below) |
+| `ptz.move_continuous` | Move at a capped velocity for 0.5 to 5 seconds, then the server stops the camera itself | write, gated, and only for cameras with `ptz_honours_timeout` (see below) |
 | `ptz.stop` | Stop pan, tilt and zoom on a profile, then report whether the camera confirms it | halt, gated (see below) |
 
 ## How a move is gated
@@ -115,8 +122,12 @@ flowchart TD
 Each gate is checked by the server, not requested from the model. Every attempt, allowed or
 refused, is written to stderr as an audit line without arguments or credentials. The diagram
 is the path of a write tool; `ptz.stop` is the exception and skips the dry run and the rate
-limit (see [ptz.move_relative and ptz.stop](#ptzmove_relative-and-ptzstop)). The details,
-including what happens when a send fails halfway, are under [ptz.goto_preset](#ptzgoto_preset).
+limit (see [ptz.move_relative and ptz.stop](#ptzmove_relative-and-ptzstop)). A real move also
+needs the camera to be free: while one real move holds a camera, every other real move on it is
+refused as busy. `ptz.move_continuous` has two more gates: the camera must set
+`"ptz_honours_timeout": true`, and the seconds of motion must fit its budget (see
+[ptz.move_continuous](#ptzmove_continuous)). The details, including what happens when a send
+fails halfway, are under [ptz.goto_preset](#ptzgoto_preset).
 
 ## Try it without a camera
 
@@ -129,8 +140,10 @@ must not be reused. Git does not keep file modes, so `make demo` copies the conf
 private temporary file with mode 600 first. Stdin ending (ctrl-d) stops both processes.
 
 **Control is off unless `-enable-control` is passed and the camera sets `"control": true`.**
-With control off, `ptz.goto_preset`, `ptz.move_relative` and `ptz.stop` do not appear in `tools/list` at all. The demo turns
+With control off, `ptz.goto_preset`, `ptz.move_relative`, `ptz.move_continuous` and `ptz.stop` do not appear in `tools/list` at all. The demo turns
 both on (the flag in the Makefile, `"control": true` in `demo.json`) so you can see a move.
+`demo.json` does not set `ptz_honours_timeout` (the virtual camera ignores the ONVIF `Timeout`),
+so the demo does not offer `ptz.move_continuous`.
 To see the read-only server instead (ten tools), start `go run ./cmd/demo-camera` in one
 terminal and run onvif-mcp without `-enable-control` against a mode-600 copy of `demo.json`.
 
@@ -215,7 +228,7 @@ Each real and dry attempt is also written to the server's stderr as an audit lin
 streamable HTTP instead, so a containerised or remote agent can use them. It is
 stateless (no `Mcp-Session-Id`), answers every request with a single JSON body, and
 speaks HTTP/1.1 only. **No state-changing tool is registered on this transport**:
-`ptz.goto_preset`, `ptz.move_relative` and `ptz.stop` do not exist over HTTP, and
+`ptz.goto_preset`, `ptz.move_relative`, `ptz.move_continuous` and `ptz.stop` do not exist over HTTP, and
 `-transport http -enable-control` is a usage error (exit 2). Motion stays on stdio.
 
 ### Quick start (loopback)
@@ -333,6 +346,7 @@ Fields of each camera entry (the entry's key is the camera id an agent passes as
 | `control` | Opt this camera in to write tools. Default `false`. Has no effect unless the server also runs with `-enable-control`. |
 | `trust_advertised_hosts` | Allow service, stream and snapshot addresses on another host than `endpoint`. Default `false`; see below. |
 | `allow_basic_over_http` | Allow `camera.snapshot` to answer a Basic-only challenge over plain `http`. Default `false`; see "Snapshots". |
+| `ptz_honours_timeout` | The operator's attestation that this camera stops a continuous move by itself when the ONVIF `Timeout` sent with it runs out. Default `false`. Requires `"control": true` (the server refuses to start otherwise). Only cameras that set it are offered `ptz.move_continuous`; see [ptz.move_continuous](#ptzmove_continuous) for how to earn it. |
 
 A documentation-only example is in [testdata/cameras.example.json](testdata/cameras.example.json),
 using the reserved address `192.0.2.10` and `REPLACE_ME` credentials. Copy it, edit it, and
@@ -385,9 +399,15 @@ onvif-mcp -config cameras.json
 
 Write tools are rate limited per device: one movement per 2 seconds, burst 1. The budget is
 keyed by the camera's endpoint (case, scheme, default port and a trailing slash are
-ignored), so two config entries that point at the same endpoint share one budget. These
-are code defaults (`safety.PolicyOptions`), and v0.1 has no flag or config key to change
-them; `onvif://server/policy` reports the values in force.
+ignored), so two config entries that point at the same endpoint share one budget. The same
+key holds a per-device lease: one real move at a time, and a real move that finds the device
+busy is refused with `blocked_by_policy` and `retry_after_seconds` without spending a token.
+`ptz.move_continuous` also draws on a budget of seconds of motion per device: 5 seconds,
+regained at one second per 4 seconds (about a 20 percent duty cycle), charged in full before
+each move is sent. These are code defaults (`safety.PolicyOptions`), there is no flag or
+config key to change them, and `onvif://server/policy` reports the values in force. Two config
+entries that reach the same camera through different endpoint strings (a name and an IP
+address, say) are not recognised as one device.
 
 The server speaks MCP over stdio: stdout carries only JSON-RPC, and all logging goes to
 stderr. Exit codes: 0 on a clean shutdown (stdin closed, SIGINT or SIGTERM), 1 for a
@@ -475,7 +495,12 @@ Honest limits of this version: a looping model can still issue up to 30 capped s
 per device, and there is no cumulative travel budget; on an endless-rotation pan dome that can
 turn the head continuously, and on any camera repeated steps wear the motors. This residual risk
 is accepted because real calls default to dry runs, the rate limit holds a loop to 30 steps a
-minute, and the audit trail makes a loop visible. Continuous and absolute moves are not offered.
+minute, and the audit trail makes a loop visible. Absolute moves are not offered.
+
+`ptz.stop` also ends a `ptz.move_continuous` running on the same camera, whatever profile it
+uses: it tells the move to end at once (`interrupted_motion` is true in the result), and the move
+then sends its own stop as well. A `ptz.stop` that arrives while the move is still being validated
+cancels it before it is sent.
 
 A shutdown signal (SIGINT or SIGTERM) starts an orderly exit. A second signal within 5 seconds
 is held, so it cannot abort a dispatched stop or a move in flight; a signal after those 5
@@ -487,6 +512,60 @@ To enable it for one camera:
 # in cameras.json, on the PTZ camera only:  "control": true
 onvif-mcp -config cameras.json -enable-control
 ```
+
+### `ptz.move_continuous`
+
+A continuous move is the one command whose end depends on something staying alive: the camera
+keeps moving until it is told to stop. This tool is built around that.
+
+**It exists only for cameras whose operator attests the camera honours the ONVIF `Timeout`.**
+Every `ContinuousMove` carries a `Timeout`, after which a compliant camera stops by itself. If
+this server is killed (SIGKILL), runs out of memory, loses power or loses the network between the
+move and its stop, **that `Timeout` is the only thing left that stops the camera**. Some cameras
+ignore it (the virtual camera used for testing does), and the server cannot find out which:
+onvif-go reads no PTZ node capabilities. So the tool is registered only when at least one camera
+sets `"ptz_honours_timeout": true` (with `-enable-control` and `"control": true`), and a call
+naming any other camera is refused with `blocked_by_policy`, dry runs included.
+`ptz_honours_timeout` is the operator's claim about the camera's firmware, not something the
+server checks. Earn it with the hardware test `TestHardwareTimeoutHonoured` (see "Hardware tests"
+below), which sends a move with a 2 second `Timeout` and no stop and passes only if the camera
+stops by itself; re-run it after a firmware update.
+
+It takes `camera`, `profile` (a token from `media.profiles` with `has_ptz` true), `dry_run`,
+any of `pan`, `tilt`, `zoom`, and the required `duration_seconds`.
+
+- **Units and caps.** Each axis is a velocity in the ONVIF generic velocity space, with the space
+  URI set explicitly on each vector (`space_sent`), at most 0.5 in magnitude; at least one must be
+  non-zero. What a value means physically, and which way a positive value moves the camera, is
+  defined by the camera. `duration_seconds` is 0.5 to 5, with no default. Anything else is refused
+  with `invalid_argument` naming the field, the range and a corrected call, never clamped, and
+  sends nothing. A camera that ignores the `Space` it is sent is not detected.
+- **Dry run by default.** With `dry_run` omitted or true it validates and reports the exact
+  velocities, the duration and the `Timeout` it would send (`camera_timeout`), and moves nothing.
+- **It blocks, then stops the camera itself.** A real call sends `ContinuousMove` once, with
+  `Timeout` set to the duration rounded up to the millisecond (`PT1.5S`), waits for the duration,
+  and then sends its own `Stop` for pan/tilt and zoom on the client it moved with: up to 3
+  attempts, 1 second apart, within 8 seconds, then up to three status reads. `stop_status` is
+  `confirmed_idle` or `sent_unconfirmed`, as for `ptz.stop`, and `stopped_by` says what ended the
+  move: `deadline`, `ptz.stop`, `cancelled` (the request was cancelled, or stdin closed) or
+  `shutdown`. That stop runs on a context detached from the request, from a deferred call, so it
+  also runs after a cancel, a shutdown signal, a panic or a failed send. A send that fails, times
+  out or gets an empty reply is treated as sent and stopped at once; a camera that does not answer
+  the move within the duration is stopped at the deadline. If the server's stop cannot be
+  delivered at all, the call fails with a message beginning `MOTION MAY CONTINUE on camera ...`,
+  logged at error level: call `ptz.stop` immediately; the camera's own `Timeout` is then what
+  remains.
+- **Budget and busy.** Each real move first draws its whole `duration_seconds` from the camera's
+  budget of seconds of motion, and is never refunded; the 2 second rate limit applies too. Until
+  the move has been stopped, every other real move on the camera (`ptz.move_relative`,
+  `ptz.goto_preset`, another `ptz.move_continuous`) is refused as busy. `ptz.stop` is never
+  blocked.
+- **Audit.** Besides the usual audit line, a real move writes `motion started` before the command
+  is sent and `motion stopped` afterwards, paired by a `motion_id`. A start without a stop in the
+  log is a move whose end this process did not see.
+
+A second shutdown signal more than 5 seconds after the first ends the process at once, which can
+cut the stop's retries short; the camera's `Timeout` is then what remains.
 
 <details>
 <summary><b>Output limits and caveats</b></summary>
@@ -618,12 +697,24 @@ never printed. The read matrix calls the read tools per camera, accepts `not_sup
 vendor quirks, checks the result envelope and that no password appears in any output, and logs
 only camera id, tool name and outcome code.
 
-Two tests physically move a camera, so each needs a second, explicit opt-in.
+Four tests physically move a camera, so each needs a second, explicit opt-in.
 
 `ONVIF_MCP_HW_NUDGE=<camera-id>:<profile-token>` runs the relative-move test: it checks that
 omitting `dry_run` sends nothing and that a pan of 0.5 is refused, sends a pan of +0.05, waits
 out the per-device rate limit, sends -0.05, and always ends with `ptz.stop`. It has not been run
 against hardware, and it cannot judge whether the camera is free to move a little each way.
+
+`ONVIF_MCP_HW_CONTINUOUS=<camera-id>:<profile-token>` runs the `ptz_honours_timeout` proof,
+`TestHardwareTimeoutHonoured`. It bypasses the server: through the client library it sends one
+`ContinuousMove` with a small pan velocity and a `Timeout` of 2 seconds, sends **no** `Stop`, and
+polls the status for 5 seconds. It passes only if the camera reported `MOVING` and then, after at
+least a second, `IDLE` by itself. A camera that keeps moving fails ("do NOT set
+ptz_honours_timeout"); one that reports no movement state, never reports `MOVING`, stops within the
+first second or ends `UNKNOWN` is inconclusive, which is not an attestation either. A stop is
+always sent at the end. The camera must be clear to pan slowly for a few seconds and not near a
+pan limit. With the same variable, `TestHardwareContinuousMove` runs `ptz.move_continuous` through
+the server for one second, but only for a camera whose config already sets
+`ptz_honours_timeout`. Neither has been run against hardware.
 
 `ONVIF_MCP_HW_MOVE=<camera-id>:<profile-token>:<preset-token>` runs the preset test. It names exactly one camera and
 one preset, calls once without `dry_run` to confirm that is a dry run, then moves once, checks
@@ -658,9 +749,16 @@ onvif-mcp deliberately exposes a small surface. It does **not**:
 - Subscribe to or pull ONVIF events. The client library supports PullPoint, but the
   virtual camera used for testing implements no events service, so it cannot be
   covered without hardware.
-- Perform continuous or absolute PTZ movement, or set a speed. A camera moves only through
-  `ptz.goto_preset` (a target the camera stored itself) and `ptz.move_relative` (finite, at
-  most 0.25 per axis per call, the camera's default speed). `ptz.stop` only stops.
+- Perform absolute PTZ movement, or set a speed. A camera moves only through
+  `ptz.goto_preset` (a target the camera stored itself), `ptz.move_relative` (finite, at
+  most 0.25 per axis per call, the camera's default speed) and, on cameras with
+  `ptz_honours_timeout`, `ptz.move_continuous` (at most 0.5 per axis, 0.5 to 5 seconds, then
+  stopped by the server). `ptz.stop` only stops.
+- Guarantee that a continuous move ends if this process dies. After SIGKILL, an out-of-memory
+  kill, a power loss or a network loss mid-move, only the camera's own ONVIF `Timeout` stops it.
+  `ptz_honours_timeout` is the operator's claim that the camera honours it; the server cannot
+  check it, and a camera that ignores it can keep moving until a mechanical end stop.
+  `ptz.move_continuous` is not offered over HTTP, and has not been run on a physical camera.
 - Bound the total travel of repeated relative moves. There is no cumulative budget; the
   limit is the cap per call and 30 calls a minute per device (shared with `ptz.goto_preset`).
   On an endless-rotation pan dome a looping model can spin the head. It does not detect a

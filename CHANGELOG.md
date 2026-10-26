@@ -7,7 +7,40 @@ matching the pushed tag as the GitHub Release notes, so every tag needs a non-em
 
 ## [Unreleased]
 
+### Added
+
+- `ptz.move_continuous` (stdio, gated): move at a velocity of at most 0.5 per axis, in the explicit
+  ONVIF generic velocity space, for a required `duration_seconds` of 0.5 to 5; the call blocks and the
+  server then stops the camera itself and reports `stop_status` and `stopped_by`. It is a dry run by
+  default. The duration is sent as the camera's ONVIF `Timeout` (rounded up to the millisecond). The
+  server's stop is sent from a deferred call on a context detached from the request, so it also
+  follows a cancel, a shutdown signal, stdin closing, a panic or a failed send: up to 3 attempts 1 s
+  apart within 8 s, then tri-state confirmation. A stop that cannot be delivered fails the call with
+  `MOTION MAY CONTINUE on camera ...` and an error-level audit record.
+- `ptz_honours_timeout` camera config key (default `false`, requires `"control": true`): the
+  operator's attestation that the camera stops a continuous move by itself when the ONVIF `Timeout`
+  runs out. `ptz.move_continuous` is registered only when at least one camera sets it and refuses,
+  dry or real, any camera that does not. After SIGKILL, an OOM kill or power loss mid-move that
+  `Timeout` is the only thing left that stops the camera, and the server cannot check the claim.
+- A per-device budget of seconds of motion for `ptz.move_continuous` (5 s, one second regained per
+  4 s), charged in full before each move is sent and never refunded.
+- Opt-in hardware tests `TestHardwareTimeoutHonoured` (the attestation proof: a move with a 2 s
+  `Timeout` and no stop must end by itself) and `TestHardwareContinuousMove`, behind the `hardware`
+  build tag and `ONVIF_MCP_HW_CONTINUOUS=<camera-id>:<profile-token>`. Neither has been run.
+- Audit records `motion started` and `motion stopped`, paired by a server-generated `motion_id`.
+
 ### Changed
+
+- Every real write now holds a per-device lease for the whole call. A second real move on a camera
+  that is busy (same endpoint, any id, any write tool) is refused with `blocked_by_policy`,
+  `retry_after_seconds` and no rate token spent, where before two concurrent calls could both pass
+  the gate. `ptz.stop` never takes the lease and is never blocked by it.
+- `ptz.stop` first tells a `ptz.move_continuous` on the same camera to end (that move then sends its
+  own stop too), and reports `interrupted_motion`. A stop that arrives while the move is still being
+  validated cancels it before it is sent.
+- The `onvif://server/policy` resource names `ptz.move_continuous` among the gated tools, reports
+  `ptz_honours_timeout` per camera (always false over HTTP) and the
+  `continuous_motion_budget_per_camera`.
 
 - **Go 1.26 or newer is now required** (go.mod `go 1.26.0`), because rtspeek v1.0.0 and go-sdk v1.8.0 need it. Dependencies: rtspeek 0.2.0 to 1.0.0, go-sdk 1.7.0 to 1.8.0, gortsplib 5.5.0 to 5.6.6, mediacommon 2.9.3 to 2.9.5, and indirect updates. `stream.inspect` reads the codec name from the stream's rtpmap instead of gortsplib's deprecated `Format.Codec`.
 

@@ -7,7 +7,8 @@
       "timeout_seconds": 10,
       "control": false,
       "trust_advertised_hosts": false,
-      "allow_basic_over_http": false
+      "allow_basic_over_http": false,
+      "ptz_honours_timeout": false
     }
   }
 }
