@@ -1931,7 +1931,7 @@
       "readOnlyHint": false,
       "title": "Stop PTZ movement"
     },
-    "description": "Use this to stop a PTZ camera that a move started through this server is moving (ptz.move_relative, ptz.goto_preset). It cannot be relied on for motion started by another client. Pass the profile you moved (call media.profiles for a profile with has_ptz true). Stop is per profile: if you are unsure which profile moved, call it once per has_ptz profile. This tool has no dry run and is not rate limited, so it always acts; it only works on cameras the operator opted in to control. It stops pan, tilt and zoom, then reads the camera's status: stop_status confirmed_idle means the camera reports it idle; sent_unconfirmed means the stop was delivered but not confirmed (many cameras report no movement state), so check ptz.status or camera.snapshot. If the stop could not be delivered the call fails and you should call ptz.stop again immediately. Stopping a camera that is already idle is harmless. Does not move the camera.",
+    "description": "Use this to stop a PTZ camera that a move started through this server is moving (ptz.move_relative, ptz.goto_preset, ptz.move_continuous). It cannot be relied on for motion started by another client. Pass the profile you moved (call media.profiles for a profile with has_ptz true). Stop is per profile: if you are unsure which profile moved, call it once per has_ptz profile. This tool has no dry run and is not rate limited, so it always acts; it only works on cameras the operator opted in to control. If a ptz.move_continuous is running on the camera it is told to end at once (interrupted_motion true) and sends its own stop too. It stops pan, tilt and zoom, then reads the camera's status: stop_status confirmed_idle means the camera reports it idle; sent_unconfirmed means the stop was delivered but not confirmed (many cameras report no movement state), so check ptz.status or camera.snapshot. If the stop could not be delivered the call fails and you should call ptz.stop again immediately. Stopping a camera that is already idle is harmless. Does not move the camera.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2006,6 +2006,10 @@
                 "object"
               ]
             },
+            "interrupted_motion": {
+              "description": "true when a ptz.move_continuous was running on this camera and was told to end now; that call then sends its own stop too and reports its own outcome",
+              "type": "boolean"
+            },
             "note": {
               "description": "what happened and what to do next",
               "type": "string"
@@ -2023,6 +2027,7 @@
             "executed",
             "stop_status",
             "profile",
+            "interrupted_motion",
             "note"
           ],
           "type": [

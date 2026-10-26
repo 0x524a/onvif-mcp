@@ -29,9 +29,23 @@ var gatedSurface = []string{"ptz.goto_preset", "ptz.move_relative", "ptz.stop"}
 
 const writeTool = "ptz.goto_preset"
 
+// continuousTool is registered only when a camera attests ptz_honours_timeout.
+const continuousTool = "ptz.move_continuous"
+
 func listTools(t *testing.T, control bool) []*mcp.Tool {
 	t.Helper()
-	cs := policyServer(t, func(r *registry.Registry) *safety.Policy { return testPolicy(r, control) })
+	return listToolsOf(t, policyServer(t, func(r *registry.Registry) *safety.Policy { return testPolicy(r, control) }))
+}
+
+// listToolsAttested is listTools over a config whose cam-a also sets
+// ptz_honours_timeout.
+func listToolsAttested(t *testing.T, control bool) []*mcp.Tool {
+	t.Helper()
+	return listToolsOf(t, attestedPolicyServer(t, func(r *registry.Registry) *safety.Policy { return testPolicy(r, control) }))
+}
+
+func listToolsOf(t *testing.T, cs *mcp.ClientSession) []*mcp.Tool {
+	t.Helper()
 	res, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +90,19 @@ func TestAllThirteenToolsListedWhenControlEnabled(t *testing.T) {
 	}
 }
 
+// ptz.move_continuous needs a camera that attests ptz_honours_timeout as well as
+// control: then there are fourteen tools, and without control still ten.
+func TestFourteenToolsListedWhenACameraAttestsTheTimeout(t *testing.T) {
+	got := names(listToolsAttested(t, true))
+	want := sorted(append(append(append([]string(nil), readTools...), gatedSurface...), continuousTool))
+	if len(got) != 14 || !equal(got, want) {
+		t.Fatalf("control on, attested: tools = %v, want exactly %v", got, want)
+	}
+	if got := names(listToolsAttested(t, false)); !equal(got, sorted(readTools)) {
+		t.Fatalf("control off, attested: tools = %v", got)
+	}
+}
+
 func TestTenReadToolsListedWhenControlDisabled(t *testing.T) {
 	got := names(listTools(t, false))
 	if len(got) != 10 || !equal(got, sorted(readTools)) {
@@ -96,7 +123,7 @@ func TestControlOffSurfaceIsUnchangedFromV01AndMotionToolsAreNamedByThePolicy(t 
 		t.Fatal(err)
 	}
 	body := res.Contents[0].Text
-	for _, name := range []string{"ptz.move_relative", "ptz.stop"} {
+	for _, name := range []string{"ptz.move_relative", "ptz.stop", continuousTool, "ptz_honours_timeout"} {
 		if !bytes.Contains([]byte(body), []byte(name)) {
 			t.Errorf("the policy resource must name %s: %s", name, body)
 		}
@@ -108,9 +135,10 @@ func TestMotionToolAnnotationsAreExplicit(t *testing.T) {
 		"ptz.goto_preset":   {true, true},
 		"ptz.move_relative": {true, false},
 		"ptz.stop":          {false, true},
+		continuousTool:      {true, false},
 	}
 	seen := 0
-	for _, tl := range listTools(t, true) {
+	for _, tl := range listToolsAttested(t, true) {
 		w, ok := want[tl.Name]
 		if !ok {
 			continue
@@ -148,11 +176,19 @@ func TestWriteToolAnnotationsAreExplicit(t *testing.T) {
 // deliberate change and review the diff.
 func TestToolsListSnapshot(t *testing.T) {
 	for _, mode := range []struct {
-		file    string
-		control bool
-	}{{"tools_list_control_off.golden.json", false}, {"tools_list_control_on.golden.json", true}} {
+		file            string
+		control, attest bool
+	}{
+		{"tools_list_control_off.golden.json", false, false},
+		{"tools_list_control_on.golden.json", true, false},
+		{"tools_list_control_on_attested.golden.json", true, true},
+	} {
 		t.Run(mode.file, func(t *testing.T) {
-			got, err := json.MarshalIndent(listTools(t, mode.control), "", "  ")
+			list := listTools
+			if mode.attest {
+				list = listToolsAttested
+			}
+			got, err := json.MarshalIndent(list(t, mode.control), "", "  ")
 			if err != nil {
 				t.Fatal(err)
 			}

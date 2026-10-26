@@ -271,9 +271,11 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 	tools.RegisterStream(srv, deps)
 	tools.RegisterSnapshot(srv, deps)
 
-	// The gated tools: ptz.goto_preset and ptz.move_relative (RiskWrite) and
-	// ptz.stop (RiskHalt). They go through tools.GuardedTool, which keeps them
-	// out of tools/list while control is disabled and lists them in the policy.
+	// The gated tools: ptz.goto_preset, ptz.move_relative and ptz.move_continuous
+	// (RiskWrite) and ptz.stop (RiskHalt). They go through tools.GuardedTool, which
+	// keeps them out of tools/list while control is disabled and lists them in the
+	// policy. ptz.move_continuous also stays out unless a camera attests
+	// ptz_honours_timeout.
 	tools.RegisterPTZWrites(srv, deps)
 	tools.RegisterPTZMotion(srv, deps)
 
@@ -290,11 +292,8 @@ func New(reg *registry.Registry, log *slog.Logger, policy *safety.Policy, opts .
 		return grants
 	})
 
-	gated := len(policy.GatedTools())
-	registered := tools.ClaimedCount(srv) - gated
-	if policy.WriteRegistered() {
-		registered += gated
-	}
-	log.Debug("tools registered", "count", registered, "gated", gated)
+	// Counted, not computed: a gated tool can stay unregistered even with control
+	// on (ptz.move_continuous without an attested camera).
+	log.Debug("tools registered", "count", tools.RegisteredCount(srv), "gated", len(policy.GatedTools()))
 	return srv
 }

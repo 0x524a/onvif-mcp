@@ -25,9 +25,22 @@ func testPolicy(reg *registry.Registry, control bool) *safety.Policy {
 
 func policyServer(t *testing.T, p func(*registry.Registry) *safety.Policy) *mcp.ClientSession {
 	t.Helper()
+	return policyServerWith(t, false, p)
+}
+
+// attestedPolicyServer is policyServer with cam-a also setting
+// ptz_honours_timeout.
+func attestedPolicyServer(t *testing.T, p func(*registry.Registry) *safety.Policy) *mcp.ClientSession {
+	t.Helper()
+	return policyServerWith(t, true, p)
+}
+
+func policyServerWith(t *testing.T, attest bool, p func(*registry.Registry) *safety.Policy) *mcp.ClientSession {
+	t.Helper()
 	cam := testcam.Start(t)
 	reg := registry.New(&config.Config{Cameras: map[string]*config.Camera{
-		"cam-a":     {ID: "cam-a", Endpoint: cam.Endpoint(), Username: cam.Username(), Password: cam.Password(), Control: true},
+		"cam-a": {ID: "cam-a", Endpoint: cam.Endpoint(), Username: cam.Username(), Password: cam.Password(), Control: true,
+			PTZHonoursTimeout: attest},
 		"cam-fixed": {ID: "cam-fixed", Endpoint: cam.Endpoint(), Username: cam.Username(), Password: cam.Password()},
 	}})
 	return connect(t, newOp(reg, quietLog(), p(reg)))
@@ -136,7 +149,8 @@ func TestWriteToolIsHiddenWithControlOffButNamedByThePolicy(t *testing.T) {
 }
 
 func TestWriteToolIsListedWithControlOnAndWritableCamerasAreReported(t *testing.T) {
-	cs := policyServer(t, func(r *registry.Registry) *safety.Policy { return testPolicy(r, true) })
+	// cam-a attests ptz_honours_timeout, so every gated tool is registered.
+	cs := attestedPolicyServer(t, func(r *registry.Registry) *safety.Policy { return testPolicy(r, true) })
 	res, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -180,8 +194,10 @@ func TestWriteToolRejectsAStringDryRunWithTheEnvelope(t *testing.T) {
 	}
 }
 
-// gatedTools are every tool that needs control: two writes and the halt tool.
-var gatedTools = []string{"ptz.goto_preset", "ptz.move_relative", "ptz.stop"}
+// gatedTools are every tool that needs control: three writes and the halt tool.
+// The policy names every gated tool, including ptz.move_continuous, which is
+// registered only when a camera attests ptz_honours_timeout.
+var gatedTools = []string{"ptz.goto_preset", "ptz.move_continuous", "ptz.move_relative", "ptz.stop"}
 
 func anyEqual(got []any, want []string) bool {
 	if len(got) != len(want) {

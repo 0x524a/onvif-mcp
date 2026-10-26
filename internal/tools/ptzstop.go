@@ -30,16 +30,21 @@ type StopData struct {
 	StopStatus string      `json:"stop_status" jsonschema:"confirmed_idle: the stop was delivered and the camera reports it idle; sent_unconfirmed: the stop was delivered but the camera did not confirm it (it reported MOVING or UNKNOWN, reported no movement state, or its status could not be read)"`
 	Profile    string      `json:"profile" jsonschema:"the profile token the stop addressed"`
 	Final      *StatusData `json:"final,omitempty" jsonschema:"the last PTZ status read after the stop, same shape as ptz.status; absent means none could be read; absent fields were not reported"`
-	Note       string      `json:"note" jsonschema:"what happened and what to do next"`
+	// InterruptedMotion: a ptz.move_continuous was running on this camera's
+	// device and was told to end at once; it sends its own stop as well.
+	InterruptedMotion bool   `json:"interrupted_motion" jsonschema:"true when a ptz.move_continuous was running on this camera and was told to end now; that call then sends its own stop too and reports its own outcome"`
+	Note              string `json:"note" jsonschema:"what happened and what to do next"`
 }
 
-// RegisterPTZMotion registers the motion tools: ptz.stop (RiskHalt) and
-// ptz.move_relative (RiskWrite). With control off neither is registered, but
-// both are named by the policy resource.
+// RegisterPTZMotion registers the motion tools: ptz.stop (RiskHalt),
+// ptz.move_relative and ptz.move_continuous (RiskWrite). With control off none
+// is registered, but all are named by the policy resource. ptz.move_continuous
+// is also registered only when at least one camera sets ptz_honours_timeout.
 func RegisterPTZMotion(srv *mcp.Server, d Deps) {
 	// Stop first: a move tool must never be registered without it.
 	registerPTZStop(srv, d)
 	registerPTZMoveRelative(srv, d)
+	registerPTZMoveContinuous(srv, d)
 }
 
 func stopSchema() *jsonschema.Schema {
@@ -66,10 +71,11 @@ func registerPTZStop(srv *mcp.Server, d Deps) {
 		InputSchema: stopSchema(),
 		Name:        stopTool,
 		Description: "Use this to stop a PTZ camera that a move started through this server is moving (ptz.move_relative, " +
-			"ptz.goto_preset). It cannot be relied on for motion started by another client. Pass the profile you moved (call media.profiles for a profile with has_ptz true). Stop is " +
+			"ptz.goto_preset, ptz.move_continuous). It cannot be relied on for motion started by another client. Pass the profile you moved (call media.profiles for a profile with has_ptz true). Stop is " +
 			"per profile: if you are unsure which profile moved, call it once per has_ptz profile. This tool has no dry " +
 			"run and is not rate limited, so it always acts; it only works on cameras the operator opted in to control. " +
-			"It stops pan, tilt and zoom, then reads the camera's status: stop_status confirmed_idle means the camera " +
+			"If a ptz.move_continuous is running on the camera it is told to end at once (interrupted_motion true) and " +
+			"sends its own stop too. It stops pan, tilt and zoom, then reads the camera's status: stop_status confirmed_idle means the camera " +
 			"reports it idle; sent_unconfirmed means the stop was delivered but not confirmed (many cameras report no " +
 			"movement state), so check ptz.status or camera.snapshot. If the stop could not be delivered the call fails " +
 			"and you should call ptz.stop again immediately. Stopping a camera that is already idle is harmless. Does " +
@@ -84,16 +90,25 @@ func ptzStopRun(d Deps) mcp.ToolHandlerFor[StopIn, mcperr.Out[StopData]] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in StopIn) (*mcp.CallToolResult, mcperr.Out[StopData], error) {
 		// The guard noted nothing yet; the audit target is scrubbed and bounded.
 		safety.NoteTarget(ctx, in.Profile)
+		// First wake a continuous move holding this device, whatever profile it
+		// uses: it then sends its own Stop on its own profile and client, so a
+		// typo here, or a stop round that fails, cannot leave it running to its
+		// deadline. It only ever shortens motion.
+		interrupted := d.Policy.InterruptMotion(in.Camera)
 		rep := stopAndConfirm(ctx, d, in.Camera, in.Profile)
 		if rep.Err != nil {
+			if interrupted {
+				rep.Err.Message += "; a ptz.move_continuous on this camera was told to end now and sends its own stop"
+			}
 			return fail[StopData](rep.Err)
 		}
 		data := StopData{
-			Executed:   rep.Sent,
-			StopStatus: rep.Status,
-			Profile:    clip(redact.Scrub(in.Profile)),
-			Final:      rep.Final,
-			Note:       rep.Note + perProfileNote,
+			Executed:          rep.Sent,
+			StopStatus:        rep.Status,
+			Profile:           clip(redact.Scrub(in.Profile)),
+			Final:             rep.Final,
+			InterruptedMotion: interrupted,
+			Note:              rep.Note + perProfileNote,
 		}
 		msg := "Stop delivered; camera reports idle."
 		if rep.Status != stopConfirmedIdle {

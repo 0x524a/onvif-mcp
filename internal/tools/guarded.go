@@ -57,7 +57,7 @@ import (
 //     Deps.Base, so a cancel or a shutdown cannot abort a stop that has been
 //     dispatched. The audit is attempted and its failure never blocks the stop.
 //
-// NonIdempotent is accepted for RiskWrite only.
+// NonIdempotent and RequiresTimeoutAttestation are accepted for RiskWrite only.
 //
 // Misuse panics at registration instead of returning an error. It is a
 // programming error in a fixed set of calls made while the server starts, so
@@ -78,6 +78,9 @@ func GuardedTool[In, Data any](
 	if o.nonIdempotent && risk != safety.RiskWrite {
 		panic("tools.GuardedTool: " + t.Name + ": NonIdempotent applies to RiskWrite tools only")
 	}
+	if o.attested && risk != safety.RiskWrite {
+		panic("tools.GuardedTool: " + t.Name + ": RequiresTimeoutAttestation applies to RiskWrite tools only")
+	}
 	tc := *t
 	title := ""
 	if t.Annotations != nil {
@@ -94,6 +97,7 @@ func GuardedTool[In, Data any](
 			panic("tools.GuardedTool: " + t.Name + ": an input embedding safety.WriteBase must be registered as RiskWrite")
 		}
 		claimName(srv, t.Name)
+		markRegistered(srv, t.Name)
 		tc.Annotations = ReadOnly(title)
 		if t.Annotations != nil && t.Annotations.OpenWorldHint != nil {
 			// The one hint a read tool may choose: discovery reaches
@@ -116,10 +120,21 @@ func GuardedTool[In, Data any](
 		}
 		claimName(srv, t.Name)
 		d.Policy.NoteGated(t.Name)
+		var evalOpts []safety.EvalOption
+		if o.attested {
+			d.Policy.NoteTimed(t.Name)
+			evalOpts = append(evalOpts, safety.RequireTimeoutAttestation())
+		}
 		if !d.Policy.WriteRegistered() {
 			return
 		}
-		add(srv, &tc, guardedHandler(d, t.Name, run, dryRun))
+		if o.attested && !d.Reg.AnyHonoursTimeout() {
+			// No camera could accept it, so it is not offered at all; the policy
+			// resource still names it and says what an operator must set.
+			return
+		}
+		markRegistered(srv, t.Name)
+		add(srv, &tc, guardedHandler(d, t.Name, run, dryRun, evalOpts...))
 
 	case safety.RiskHalt:
 		var zero In
@@ -138,6 +153,7 @@ func GuardedTool[In, Data any](
 		if !d.Policy.WriteRegistered() {
 			return
 		}
+		markRegistered(srv, t.Name)
 		add(srv, &tc, haltHandler(d, t.Name, run))
 
 	default:
@@ -148,12 +164,20 @@ func GuardedTool[In, Data any](
 // GuardedOption adjusts how GuardedTool registers a tool.
 type GuardedOption func(*guardedOpts)
 
-type guardedOpts struct{ nonIdempotent bool }
+type guardedOpts struct{ nonIdempotent, attested bool }
 
 // NonIdempotent marks a RiskWrite tool whose repeated calls compound (a
 // relative move): idempotentHint is false instead of the WriteAnnotations
 // default. It is the single permitted deviation from WriteAnnotations.
 func NonIdempotent() GuardedOption { return func(o *guardedOpts) { o.nonIdempotent = true } }
+
+// RequiresTimeoutAttestation marks a RiskWrite tool whose motion lasts a
+// requested duration (ptz.move_continuous). On top of the write gates it is
+// registered only when at least one camera carries the operator's
+// ptz_honours_timeout attestation (registry.Registry.AnyHonoursTimeout), and
+// every call, dry or real, is refused for a camera that does not
+// (safety.RequireTimeoutAttestation). It is noted on the policy either way.
+func RequiresTimeoutAttestation() GuardedOption { return func(o *guardedOpts) { o.attested = true } }
 
 // maxEchoedCamera bounds the camera id echoed back in an error.
 const maxEchoedCamera = 256
@@ -165,7 +189,9 @@ func readTool[In, Data any](srv *mcp.Server, d Deps, t *mcp.Tool, h mcp.ToolHand
 
 var (
 	namesMu sync.Mutex
-	names   = map[weak.Pointer[mcp.Server]]map[string]struct{}{}
+	// names maps a server to its claimed tool names; the value is whether the
+	// tool was actually registered.
+	names = map[weak.Pointer[mcp.Server]]map[string]bool{}
 )
 
 // ClaimedCount reports how many tool names have been claimed on srv through
@@ -174,6 +200,29 @@ func ClaimedCount(srv *mcp.Server) int {
 	namesMu.Lock()
 	defer namesMu.Unlock()
 	return len(names[weak.Make(srv)])
+}
+
+// RegisteredCount reports how many of the claimed tools were registered on srv,
+// that is, how many tools/list shows.
+func RegisteredCount(srv *mcp.Server) int {
+	namesMu.Lock()
+	defer namesMu.Unlock()
+	n := 0
+	for _, reg := range names[weak.Make(srv)] {
+		if reg {
+			n++
+		}
+	}
+	return n
+}
+
+// markRegistered records that the claimed tool name was registered on srv.
+func markRegistered(srv *mcp.Server, name string) {
+	namesMu.Lock()
+	defer namesMu.Unlock()
+	if set := names[weak.Make(srv)]; set != nil {
+		set[name] = true
+	}
 }
 
 // claimName records that srv has a tool called name, and panics if it already
@@ -186,7 +235,7 @@ func claimName(srv *mcp.Server, name string) {
 	defer namesMu.Unlock()
 	set, ok := names[key]
 	if !ok {
-		set = map[string]struct{}{}
+		set = map[string]bool{}
 		names[key] = set
 		runtime.AddCleanup(srv, func(k weak.Pointer[mcp.Server]) {
 			namesMu.Lock()
@@ -197,7 +246,7 @@ func claimName(srv *mcp.Server, name string) {
 	if _, dup := set[name]; dup {
 		panic("tools.GuardedTool: " + name + ": a tool with this name is already registered")
 	}
-	set[name] = struct{}{}
+	set[name] = false
 }
 
 // sentUnknownHint is appended to a device fault that follows a real write: the

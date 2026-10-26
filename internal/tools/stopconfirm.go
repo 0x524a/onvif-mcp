@@ -385,29 +385,56 @@ func stopAndConfirm(ctx context.Context, d Deps, camera, profile string) stopRep
 		return stopReport{Status: stopFailed, Sent: r.sent, Err: deliveryFailure(r, camera)}
 	}
 
-	rep := stopReport{Status: stopSentUnconfirmed, Sent: true}
+	rep := stopReport{Sent: true}
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), confirmWindow)
 	defer cancel()
+	var reason string
+	rep.Status, rep.Final, reason = confirmStopped(cctx, func(c context.Context) (*onvif.PTZStatus, bool) {
+		sr, err := gates.status.do(c, key, profile, statusRoundFor(d, e))
+		if err != nil || sr.te != nil {
+			return nil, false
+		}
+		return sr.st, true
+	}, r.unverified)
+	switch rep.Status {
+	case stopConfirmedIdle:
+		rep.Note = "The stop was delivered and the camera reports it idle."
+	default:
+		rep.Note = "The stop was delivered but not confirmed: " + reason +
+			". Check ptz.status or camera.snapshot; call ptz.stop again if it still moves."
+	}
+	return rep
+}
+
+// confirmStopped is stage 2 of a stop that was delivered: up to confirmPolls
+// status reads through read, confirmDelay apart, within ctx. It returns the
+// tri-state outcome (confirmed_idle or sent_unconfirmed), the last status read
+// (nil if none) and, when not confirmed, why.
+//
+//   - confirmed_idle: a read reported IDLE for every state field the camera
+//     reported, at least one being present, and the Stop reply was not empty
+//     (unverified false).
+//   - sent_unconfirmed: anything else: MOVING or UNKNOWN on every read, no state
+//     reported at all (one read is enough to know that), an empty Stop reply,
+//     or reads that failed or ran out of time.
+func confirmStopped(ctx context.Context, read func(context.Context) (*onvif.PTZStatus, bool), unverified bool) (string, *StatusData, string) {
+	var final *StatusData
 	reason := ""
-poll:
 	for i := 0; i < confirmPolls; i++ {
 		if i > 0 {
 			select {
 			case <-time.After(confirmDelay):
-			case <-cctx.Done():
-				reason = "the confirmation window ended"
-				break poll
+			case <-ctx.Done():
+				return stopSentUnconfirmed, final, "the confirmation window ended"
 			}
 		}
-		sr, err := gates.status.do(cctx, key, profile, statusRoundFor(d, e))
-		if err != nil || sr.te != nil {
-			reason = "the camera's status could not be read afterwards"
-			break
+		st, ok := read(ctx)
+		if !ok {
+			return stopSentUnconfirmed, final, "the camera's status could not be read afterwards"
 		}
-		sd := statusOf(sr.st)
-		rep.Final = &sd
-		reported := 0
-		allIdle := true
+		sd := statusOf(st)
+		final = &sd
+		reported, allIdle := 0, true
 		for _, s := range []string{sd.PanTiltState, sd.ZoomState} {
 			if s == "" {
 				continue
@@ -418,32 +445,18 @@ poll:
 			}
 		}
 		if reported == 0 {
-			reason = "the camera reports no movement state"
-			break
+			return stopSentUnconfirmed, final, "the camera reports no movement state"
 		}
 		if allIdle {
-			if r.unverified {
-				reason = "the camera answered the stop with an empty reply"
-				break
+			if unverified {
+				return stopSentUnconfirmed, final, "the camera answered the stop with an empty reply"
 			}
-			rep.Status = stopConfirmedIdle
-			reason = ""
-			break
+			return stopConfirmedIdle, final, ""
 		}
 		reason = "the camera still reported MOVING or UNKNOWN"
 	}
-	if r.unverified && rep.Status == stopConfirmedIdle {
-		rep.Status = stopSentUnconfirmed
+	if reason == "" {
+		reason = "the camera did not confirm"
 	}
-	switch rep.Status {
-	case stopConfirmedIdle:
-		rep.Note = "The stop was delivered and the camera reports it idle."
-	default:
-		if reason == "" {
-			reason = "the camera did not confirm"
-		}
-		rep.Note = "The stop was delivered but not confirmed: " + reason +
-			". Check ptz.status or camera.snapshot; call ptz.stop again if it still moves."
-	}
-	return rep
+	return stopSentUnconfirmed, final, reason
 }
