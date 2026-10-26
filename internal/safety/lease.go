@@ -18,9 +18,13 @@ import (
 // because Evaluate refuses an unknown camera first, so the table is bounded by
 // the config. A key is present only while held.
 //
-// A continuous move marks its lease timed (SetUntil). ptz.stop interrupts the
-// device's timed lease (Interrupt), which wakes the move's wait so its own stop
-// goes out at once. A halt never takes a lease.
+// A continuous move's lease is timed from the moment Evaluate grants it
+// (RequireTimeoutAttestation), and SetUntil records its deadline just before
+// the command is sent. ptz.stop interrupts the device's timed lease
+// (Interrupt): before the send that cancels the move (SetUntil reports false,
+// so a stop that arrives while the move is still being validated is never
+// overtaken by it); after the send it wakes the move's wait so its own stop goes
+// out at once. A halt never takes a lease.
 type Leases struct {
 	mu   sync.Mutex
 	held map[string]*Lease
@@ -64,7 +68,7 @@ func (ls *Leases) TryAcquire(key string) (*Lease, time.Duration) {
 	defer ls.mu.Unlock()
 	if h, ok := ls.held[key]; ok {
 		wait := shortWriteRetry
-		if h.timed {
+		if h.timed && !h.until.IsZero() {
 			if left := h.until.Sub(ls.now()); left > 0 {
 				wait = time.Duration(math.Ceil(left.Seconds()))*time.Second + time.Second
 			}
@@ -103,16 +107,32 @@ func (ls *Leases) heldCount() int {
 	return len(ls.held)
 }
 
-// SetUntil marks the lease as a timed motion that intends to end at t. Only a
-// timed lease can be interrupted, and its deadline is what a refused caller is
-// told to wait for.
-func (l *Lease) SetUntil(t time.Time) {
+// markTimed makes the lease interruptible before its deadline is known. Evaluate
+// calls it for a tool that needs the timeout attestation, which is exactly the
+// set of timed motions.
+func (l *Lease) markTimed() {
+	l.ls.mu.Lock()
+	defer l.ls.mu.Unlock()
+	l.timed = true
+}
+
+// SetUntil records that the timed motion holding the lease is about to start
+// and intends to end at t; that deadline is what a refused caller is told to
+// wait for. It reports false, and changes nothing, when the lease was already
+// interrupted: the motion must then not be started. Checking and setting
+// happen under one lock, so an Interrupt is either seen here or, if it comes
+// later, wakes Interrupted. A nil lease reports false.
+func (l *Lease) SetUntil(t time.Time) bool {
 	if l == nil {
-		return
+		return false
 	}
 	l.ls.mu.Lock()
 	defer l.ls.mu.Unlock()
+	if l.interrupted {
+		return false
+	}
 	l.until, l.timed = t, true
+	return true
 }
 
 // Interrupted is closed when ptz.stop interrupts this lease. A nil lease returns

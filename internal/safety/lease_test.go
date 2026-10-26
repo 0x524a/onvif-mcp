@@ -47,6 +47,7 @@ func TestLeaseRetryComesFromTheHoldersDeadline(t *testing.T) {
 	if _, wait := ls.TryAcquire("dev"); wait != time.Second {
 		t.Errorf("a short write holder: wait = %v, want 1s", wait)
 	}
+	l.markTimed()
 	l.SetUntil(clk.Now().Add(3500 * time.Millisecond))
 	if _, wait := ls.TryAcquire("dev"); wait < 3500*time.Millisecond || wait > 5*time.Second {
 		t.Errorf("a timed holder 3.5s from its deadline: wait = %v", wait)
@@ -76,7 +77,9 @@ func TestLeaseReleaseIsIdempotentAndNeverFreesALaterHolder(t *testing.T) {
 	}
 	var nilLease *Lease
 	nilLease.Release()
-	nilLease.SetUntil(time.Now())
+	if nilLease.SetUntil(time.Now()) {
+		t.Error("a nil lease cannot start a motion")
+	}
 	if nilLease.Interrupted() != nil {
 		t.Error("a nil lease has no interrupt channel")
 	}
@@ -99,6 +102,7 @@ func TestLeaseInterruptWakesOnlyATimedMotion(t *testing.T) {
 	short.Release()
 
 	timed, _ := ls.TryAcquire("dev")
+	timed.markTimed()
 	timed.SetUntil(time.Now().Add(time.Second))
 	if !ls.Interrupt("dev") {
 		t.Error("Interrupt must report a timed motion")
@@ -124,5 +128,45 @@ func TestLeasesNilIsSafe(t *testing.T) {
 	}
 	if ls.Interrupt("x") {
 		t.Error("a nil Leases interrupts nothing")
+	}
+}
+
+// A timed motion that has not been sent yet (still validating) is interrupted
+// too: its SetUntil then reports false, so it must not send. Without this a
+// ptz.stop arriving during validation would be overtaken by the move.
+func TestInterruptBeforeTheMotionStartsCancelsIt(t *testing.T) {
+	ls := NewLeases(nil)
+	l, _ := ls.TryAcquire("dev")
+	l.markTimed()
+	if !ls.Interrupt("dev") {
+		t.Fatal("a pending timed motion must count as interrupted")
+	}
+	if l.SetUntil(time.Now().Add(time.Second)) {
+		t.Fatal("SetUntil must refuse a motion that was interrupted before it started")
+	}
+	l.Release()
+
+	l, _ = ls.TryAcquire("dev")
+	l.markTimed()
+	if !l.SetUntil(time.Now().Add(time.Second)) {
+		t.Fatal("an uninterrupted motion may start")
+	}
+	if !ls.Interrupt("dev") {
+		t.Fatal("a running timed motion is interrupted")
+	}
+	l.Release()
+}
+
+func TestRequireTimeoutAttestationMakesTheLeaseInterruptibleFromTheStart(t *testing.T) {
+	p := NewPolicy(PolicyOptions{ControlEnabled: true, Cameras: attestRegistry(), Interval: time.Millisecond, Burst: 5, Log: quiet()})
+	d := p.Evaluate(opCtx(), "cam-t", contTool, false, RequireTimeoutAttestation())
+	defer d.Lease.Release()
+	if !p.InterruptMotion("cam-t") {
+		t.Fatal("a continuous move's lease must be interruptible before its deadline is set")
+	}
+	w := p.Evaluate(opCtx(), "cam-a", tool, false)
+	defer w.Lease.Release()
+	if p.InterruptMotion("cam-a") {
+		t.Error("a short write is not interruptible motion")
 	}
 }

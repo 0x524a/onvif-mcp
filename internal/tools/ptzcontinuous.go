@@ -436,6 +436,17 @@ func moveContinuousRun(d Deps) mcp.ToolHandlerFor[MoveContinuousIn, mcperr.Out[C
 				Hint:    misconfiguredTool,
 			})
 		}
+		t0 := time.Now() // before the send: the send's own time counts toward the duration
+		deadline := t0.Add(plan.dur)
+		if !lease.SetUntil(deadline) {
+			// ptz.stop interrupted this device while the move was being validated.
+			// The stop wins: the move is never sent.
+			return fail[ContinuousData](&mcperr.ToolError{
+				Code: mcperr.CodeBlockedByPolicy, Camera: in.Camera, Operation: moveContinuousOp, NotSent: true,
+				Message: "ptz.stop was called for this camera while the move was being validated, so nothing was sent",
+				Hint:    "the stop wins; call ptz.move_continuous again if the camera should still move",
+			})
+		}
 		// Charged in full, last, immediately before the send: nothing after this
 		// point can avoid it, and it is never refunded.
 		if te := d.Policy.ChargeMotion(in.Camera, moveContinuousTool, in.DurationSeconds); te != nil {
@@ -453,8 +464,6 @@ func moveContinuousRun(d Deps) mcp.ToolHandlerFor[MoveContinuousIn, mcperr.Out[C
 
 		id := newMotionID()
 		ax := plan.data.Requested
-		t0 := time.Now() // before the send: the send's own time counts toward the duration
-		lease.SetUntil(t0.Add(plan.dur))
 		d.Policy.AuditMotionStarted(moveContinuousTool, in.Camera, id,
 			safety.MotionAudit{Mode: "continuous", Pan: ax.Pan, Tilt: ax.Tilt, Zoom: ax.Zoom}, plan.dur.Milliseconds())
 
@@ -468,13 +477,40 @@ func moveContinuousRun(d Deps) mcp.ToolHandlerFor[MoveContinuousIn, mcperr.Out[C
 			res, out, err = continuousResult(in, plan, stoppedBy, sendErr, s)
 		}()
 
-		sendErr = plan.c.ContinuousMove(ctx, in.Profile, v, &timeout)
+		// The send itself is bounded by the motion deadline and ended by an
+		// interrupt, so a camera that never answers it cannot hold the server's
+		// stop back until the camera's request timeout.
+		sendCtx, cancelSend := context.WithDeadline(ctx, deadline)
+		watched := make(chan struct{})
+		go func() {
+			select {
+			case <-lease.Interrupted():
+				cancelSend()
+			case <-watched:
+			}
+		}()
+		sendErr = plan.c.ContinuousMove(sendCtx, in.Profile, v, &timeout)
+		sendExpired := errors.Is(sendCtx.Err(), context.DeadlineExceeded)
+		close(watched)
+		cancelSend()
 		if afterContinuousSend != nil {
 			afterContinuousSend()
 		}
 		if sendErr != nil {
 			// An ambiguous send counts as sent: stop at once.
-			stoppedBy = stoppedSendFailed
+			switch {
+			case isClosed(lease.Interrupted()):
+				stoppedBy = stoppedByStop
+			case ctx.Err() != nil:
+				stoppedBy = stoppedCancelled
+				if d.Base != nil && d.Base.Err() != nil {
+					stoppedBy = stoppedShutdown
+				}
+			case sendExpired:
+				stoppedBy = stoppedDeadline
+			default:
+				stoppedBy = stoppedSendFailed
+			}
 			return
 		}
 		tc, stopTimer := motionTimer(plan.dur - time.Since(t0))
@@ -494,6 +530,16 @@ func moveContinuousRun(d Deps) mcp.ToolHandlerFor[MoveContinuousIn, mcperr.Out[C
 	}
 }
 
+// isClosed reports whether ch is closed; a nil channel never is.
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
 // misconfiguredTool is the hint for a refusal only a wiring bug can reach.
 const misconfiguredTool = "this is a server bug; report it to the operator, do not retry"
 
@@ -508,7 +554,7 @@ func continuousResult(in MoveContinuousIn, plan *continuousPlan, stoppedBy strin
 		te.Retryable = false
 		what := "after the continuous move"
 		if sendErr != nil {
-			what = "after a continuous move command whose outcome is unknown (" + mcperr.FromError(sendErr, in.Camera, moveContinuousOp).Message + ")"
+			what = "after a continuous move command whose outcome is unknown"
 		}
 		te.Message = "MOTION MAY CONTINUE on camera " + in.Camera + ": the server could not deliver its stop " + what +
 			": " + s.te.Message
@@ -518,6 +564,13 @@ func continuousResult(in MoveContinuousIn, plan *continuousPlan, stoppedBy strin
 	}
 	if sendErr != nil {
 		te := mcperr.FromError(sendErr, in.Camera, moveContinuousOp)
+		switch stoppedBy {
+		case stoppedDeadline:
+			te.Message = "the camera did not answer the move command within duration_seconds, so the server abandoned it"
+			te.Hint = "if this camera is slow to answer, use a longer duration_seconds"
+		case stoppedByStop:
+			te.Message = "ptz.stop was called while the camera had not yet answered the move command, so the server abandoned it"
+		}
 		te.Message += "; the server then sent its stop: " + s.status
 		if te.SOAP != nil {
 			te.Hint = strings.TrimSpace(te.Hint + " The camera answered with a SOAP fault; if it names an unsupported space or velocity, the camera rejected the explicit generic velocity Space or the value. This server never resends without the Space.")

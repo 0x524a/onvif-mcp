@@ -265,7 +265,8 @@ type evalOpts struct{ requireAttestation bool }
 
 // RequireTimeoutAttestation makes Evaluate refuse, for dry runs and real calls
 // alike, a camera without the operator's ptz_honours_timeout attestation
-// (registry.Entry.HonoursTimeout). ptz.move_continuous passes it.
+// (registry.Entry.HonoursTimeout), and marks a real call's lease as a timed
+// motion that ptz.stop can interrupt (Leases). ptz.move_continuous passes it.
 func RequireTimeoutAttestation() EvalOption {
 	return func(o *evalOpts) { o.requireAttestation = true }
 }
@@ -389,6 +390,11 @@ func (p *Policy) Evaluate(ctx context.Context, camera, tool string, dryRun bool,
 		return refuse(blocked(camera, tool,
 			"movement is rate limited to protect the camera's mechanism", &secs,
 			"wait retry_after_seconds, then repeat the call"), ReasonRateLimited)
+	}
+	if o.requireAttestation {
+		// Only timed motions need the attestation; their lease can be
+		// interrupted by ptz.stop from the start, before the move is sent.
+		lease.markTimed()
 	}
 	return Decision{Refund: func() { p.Limiter.RefundGrant(key, grant) }, Lease: lease}
 }

@@ -406,3 +406,96 @@ func TestContinuousEndToEndCancelAt300msLeavesTheTestcamIdle(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// ---- windows around the send --------------------------------------------------
+
+// A ptz.stop that arrives while the move is still being validated wins: the
+// move is not sent at all, and its budget is not charged.
+func TestPTZStopDuringValidationCancelsTheMoveBeforeItIsSent(t *testing.T) {
+	fx := newPtzFx(t)
+	hold := make(chan struct{})
+	fx.on("GetProfiles", func(_ int, _ http.ResponseWriter, r *http.Request, body string) bool {
+		if strings.Contains(body, ">u</") {
+			select {
+			case <-hold:
+			case <-r.Context().Done():
+			}
+		}
+		return false
+	})
+	r := newContRig(t, fx, contOpts{attest: true})
+	instantTimer(t)
+	var res *mcp.CallToolResult
+	done := make(chan struct{})
+	fx.bg(t, func() { defer close(done); res = r.move(t, map[string]any{"dry_run": false, "duration_seconds": 5}) })
+	t.Cleanup(func() { r.cancel() })
+	fx.waitCount(t, "GetProfiles", 1, 5*time.Second)
+	sd := dataMap(t, call(t, r.cs, "ptz.stop", map[string]any{"camera": "fx-stopper", "profile": "prof"}))
+	if sd["interrupted_motion"] != true {
+		t.Errorf("ptz.stop = %v", sd)
+	}
+	close(hold)
+	<-done
+	if code, _ := errCode(t, res); code != "blocked_by_policy" || !strings.Contains(wire(t, res), "nothing was sent") {
+		t.Fatalf("the move must give way to the stop: %s", wire(t, res))
+	}
+	if fx.count("ContinuousMove") != 0 {
+		t.Fatal("the move was sent after the stop")
+	}
+	if len(r.records(t, "motion started")) != 0 {
+		t.Error("audited as started")
+	}
+	// Not charged: a full 5 s move still fits the budget.
+	if res := r.move(t, map[string]any{"dry_run": false, "duration_seconds": 5}); res.IsError {
+		t.Fatalf("budget was charged for a move that was never sent: %s", wire(t, res))
+	}
+}
+
+// A camera that never answers the move command does not delay the server's
+// stop: the send is abandoned at the deadline and the stop goes out then, not
+// after the camera's request timeout.
+func TestAHungSendIsAbandonedAtTheDeadlineAndStopped(t *testing.T) {
+	fx := newPtzFx(t)
+	fx.on("ContinuousMove", func(_ int, _ http.ResponseWriter, r *http.Request, _ string) bool {
+		fx.hold(r)
+		return true
+	})
+	r := newContRig(t, fx, contOpts{attest: true}) // camera timeout 5 s
+	res := r.move(t, map[string]any{"dry_run": false, "duration_seconds": 0.5})
+	if !res.IsError || !strings.Contains(wire(t, res), "did not answer") {
+		t.Fatalf("%s", wire(t, res))
+	}
+	moves, stops := fx.named("ContinuousMove"), fx.named("Stop")
+	if len(moves) != 1 || len(stops) != 1 {
+		t.Fatalf("moves=%d stops=%d", len(moves), len(stops))
+	}
+	if gap := stops[0].at.Sub(moves[0].at); gap < 400*time.Millisecond || gap > 1500*time.Millisecond {
+		t.Errorf("Stop came %v after the move, want about the 0.5 s duration, not the 5 s camera timeout", gap)
+	}
+	if s := r.records(t, "motion stopped"); len(s) != 1 || s[0]["stopped_by"] != "deadline" {
+		t.Errorf("audit = %v", s)
+	}
+}
+
+func TestPTZStopDuringAHungSendStopsAtOnce(t *testing.T) {
+	fx := newPtzFx(t)
+	fx.on("ContinuousMove", func(_ int, _ http.ResponseWriter, r *http.Request, _ string) bool {
+		fx.hold(r)
+		return true
+	})
+	r := newContRig(t, fx, contOpts{attest: true})
+	result := startHeldMove(t, r)
+	at := time.Now()
+	call(t, r.cs, "ptz.stop", map[string]any{"camera": "fx-stopper", "profile": "prof"})
+	res := result()
+	if !res.IsError {
+		t.Fatalf("an abandoned send has an unknown outcome and must be an error: %s", wire(t, res))
+	}
+	own := stopsBy(fx, "u")
+	if len(own) != 1 || own[0].at.Sub(at) > time.Second {
+		t.Fatalf("own stops = %d", len(own))
+	}
+	if s := r.records(t, "motion stopped"); len(s) != 1 || s[0]["stopped_by"] != "ptz.stop" {
+		t.Errorf("audit = %v", s)
+	}
+}

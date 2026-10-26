@@ -267,7 +267,9 @@ func TestInterruptMotionWakesTheDevicesTimedLease(t *testing.T) {
 		t.Error("nothing moving")
 	}
 	d := p.Evaluate(opCtx(), "cam-t", contTool, false, RequireTimeoutAttestation())
-	d.Lease.SetUntil(time.Now().Add(time.Minute))
+	if !d.Lease.SetUntil(time.Now().Add(time.Minute)) {
+		t.Fatal("SetUntil")
+	}
 	if p.InterruptMotion("nope") {
 		t.Error("an unknown camera interrupts nothing")
 	}
