@@ -10,6 +10,8 @@
 //   - Nothing here logs a stream URI, endpoint or raw tool output. Logs carry
 //     camera id, tool name and outcome code only.
 //   - The read matrix calls read tools only and never moves anything.
+//   - Every test that moves a camera needs its own environment variable naming
+//     exactly one camera, and always ends by stopping it.
 package mcpserver
 
 import (
@@ -21,9 +23,11 @@ import (
 	"testing"
 	"time"
 
+	onvif "github.com/0x524a/onvif-go"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/0x524a/onvif-mcp/internal/config"
+	"github.com/0x524a/onvif-mcp/internal/mcperr"
 	"github.com/0x524a/onvif-mcp/internal/registry"
 	"github.com/0x524a/onvif-mcp/internal/safety"
 )
@@ -416,4 +420,196 @@ func TestHardwareRelativeNudge(t *testing.T) {
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// hwContinuousSpec parses ONVIF_MCP_HW_CONTINUOUS=<camera-id>:<profile-token>, or
+// skips.
+func hwContinuousSpec(t *testing.T) (camID, profile string) {
+	t.Helper()
+	spec := os.Getenv("ONVIF_MCP_HW_CONTINUOUS")
+	if spec == "" {
+		t.Skip("ONVIF_MCP_HW_CONTINUOUS not set; this test physically moves a camera")
+	}
+	parts := strings.Split(spec, ":")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		t.Fatal("ONVIF_MCP_HW_CONTINUOUS must be <camera-id>:<profile-token>")
+	}
+	return parts[0], parts[1]
+}
+
+// TestHardwareTimeoutHonoured is Gate G1 for ptz.move_continuous: it decides
+// whether a camera may be given "ptz_honours_timeout": true. NOT YET RUN against
+// hardware.
+//
+// It skips unless ONVIF_MCP_HW_CONTINUOUS is exactly <camera-id>:<profile-token>.
+// The OPERATOR must confirm, before setting it, that the camera may pan slowly
+// for a few seconds from where it is now (clear of people, cabling and
+// obstructions, not near a pan limit) and that nobody depends on its view.
+//
+// It bypasses the server on purpose: through onvif-go directly it sends one
+// ContinuousMove with a small pan velocity in the generic velocity space (the
+// space ptz.move_continuous sends) and an ONVIF Timeout of PT2S, and then does
+// NOT send Stop. It polls GetStatus for up to 5 s. It passes only if the camera
+// reported MOVING and then, after at least 1 s, stopped by itself. A camera that
+// keeps moving fails; a camera that reports no movement state, never reports
+// MOVING, or stops within the first second (a pan limit, say) is inconclusive,
+// which also fails: none of those is evidence. A deferred Stop always runs
+// afterwards, so a failing camera is still stopped.
+//
+// A pass is evidence about this camera and firmware only. Re-run it after a
+// firmware update. The attestation stays the operator's claim.
+func TestHardwareTimeoutHonoured(t *testing.T) {
+	camID, profile := hwContinuousSpec(t)
+	cfg := hwConfig(t)
+	if _, ok := cfg.Cameras[camID]; !ok {
+		t.Fatalf("camera %q is not in the hardware config", camID)
+	}
+	e, err := registry.New(cfg).Get(camID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	c, err := e.Client(ctx)
+	if err != nil {
+		t.Fatalf("connect: %s", mcperr.FromError(err, camID, "Initialize").Code)
+	}
+	profiles, err := c.GetProfiles(ctx)
+	if err != nil {
+		t.Fatalf("GetProfiles: %s", mcperr.FromError(err, camID, "GetProfiles").Code)
+	}
+	hasPTZ := false
+	for _, p := range profiles {
+		hasPTZ = hasPTZ || (p != nil && p.Token == profile && p.PTZConfiguration != nil)
+	}
+	if !hasPTZ {
+		t.Fatal("the named profile does not exist on this camera or carries no PTZ configuration")
+	}
+
+	// Whatever happens below, stop the camera at the end, on a fresh context.
+	defer func() {
+		sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer scancel()
+		if err := c.Stop(sctx, profile, true, true); err != nil {
+			t.Errorf("final Stop failed: %s (check the camera by hand)", mcperr.FromError(err, camID, "Stop").Code)
+		}
+	}()
+
+	const sent = "PT2S"
+	timeout := sent
+	vel := &onvif.PTZSpeed{PanTilt: &onvif.Vector2D{X: 0.1, Y: 0,
+		Space: "http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace"}}
+	start := time.Now()
+	if err := c.ContinuousMove(ctx, profile, vel, &timeout); err != nil {
+		t.Fatalf("ContinuousMove: %s (the camera may or may not be moving; the deferred Stop runs now)",
+			mcperr.FromError(err, camID, "ContinuousMove").Code)
+	}
+
+	var sawState, sawMoving, lastWasMoving bool
+	var lastMoving, stoppedAt time.Duration
+	for time.Since(start) < 5*time.Second {
+		time.Sleep(200 * time.Millisecond)
+		st, err := c.GetStatus(ctx, profile)
+		if err != nil {
+			t.Logf("GetStatus at %v: %s", time.Since(start).Round(100*time.Millisecond), mcperr.FromError(err, camID, "GetStatus").Code)
+			continue
+		}
+		if st == nil || st.MoveStatus == nil || (st.MoveStatus.PanTilt == "" && st.MoveStatus.Zoom == "") {
+			continue
+		}
+		sawState = true
+		at := time.Since(start)
+		pt, z := st.MoveStatus.PanTilt, st.MoveStatus.Zoom
+		lastWasMoving = strings.EqualFold(pt, "MOVING") || strings.EqualFold(z, "MOVING")
+		if lastWasMoving {
+			sawMoving, lastMoving = true, at
+			continue
+		}
+		// Only IDLE in every reported field counts as stopped; UNKNOWN does not.
+		idle := (pt == "" || strings.EqualFold(pt, "IDLE")) && (z == "" || strings.EqualFold(z, "IDLE"))
+		if sawMoving && idle {
+			stoppedAt = at
+			break
+		}
+	}
+	switch {
+	case !sawState:
+		t.Fatal("INCONCLUSIVE: the camera reports no movement state, so whether it honours the Timeout cannot be seen; " +
+			"this is not an attestation: do not set ptz_honours_timeout")
+	case !sawMoving:
+		t.Fatal("INCONCLUSIVE: the camera never reported MOVING, so the move may not have started; " +
+			"this is not an attestation: do not set ptz_honours_timeout")
+	case stoppedAt == 0 && !lastWasMoving:
+		t.Fatal("INCONCLUSIVE: after MOVING the camera never reported IDLE within 5 s (it reported UNKNOWN or no " +
+			"status could be read); this is not an attestation: do not set ptz_honours_timeout")
+	case stoppedAt == 0:
+		t.Fatalf("FAILED: the camera still reported MOVING %v after a ContinuousMove with Timeout %s and no Stop; "+
+			"it does not honour the ONVIF Timeout: do NOT set ptz_honours_timeout for this camera", lastMoving.Round(100*time.Millisecond), sent)
+	case lastMoving < time.Second:
+		t.Fatalf("INCONCLUSIVE: the camera stopped %v after the send, before the %s Timeout could matter (a pan limit?); "+
+			"move it away from its limits and run again; do not set ptz_honours_timeout on this result", stoppedAt.Round(100*time.Millisecond), sent)
+	}
+	t.Logf("PASS: the camera stopped by itself %v after a ContinuousMove with Timeout %s and no Stop. "+
+		"You may set \"ptz_honours_timeout\": true for %s; re-run this after any firmware update.",
+		stoppedAt.Round(100*time.Millisecond), sent, camID)
+}
+
+// TestHardwareContinuousMove runs ptz.move_continuous through the server on a
+// camera the operator has already attested. NOT YET RUN against hardware.
+//
+// It skips unless ONVIF_MCP_HW_CONTINUOUS is set (as above) AND the named
+// camera's config entry sets "ptz_honours_timeout": true, which an operator
+// should do only after TestHardwareTimeoutHonoured passed on it. The same
+// clearance applies. Control is enabled in memory for this camera only. It checks
+// that omitting dry_run sends nothing, then sweeps at pan 0.1 for 1 s and reports
+// the stop status; whatever happens it ends with ptz.stop.
+func TestHardwareContinuousMove(t *testing.T) {
+	camID, profile := hwContinuousSpec(t)
+	cfg := hwConfig(t)
+	cam, ok := cfg.Cameras[camID]
+	if !ok {
+		t.Fatalf("camera %q is not in the hardware config", camID)
+	}
+	if !cam.PTZHonoursTimeout {
+		t.Skip("the camera's config does not set ptz_honours_timeout; run TestHardwareTimeoutHonoured first")
+	}
+	cfg.ControlEnabled = true
+	cam.Control = true
+	cs := hwSession(t, cfg)
+	defer func() {
+		env, _ := hwCall(t, cs, "ptz.stop", map[string]any{"camera": camID, "profile": profile})
+		if env.Error != nil {
+			t.Errorf("ptz.stop failed: %s (check the camera by hand)", env.Error.Code)
+		}
+	}()
+
+	args := map[string]any{"camera": camID, "profile": profile, "pan": 0.1, "duration_seconds": 1}
+	env, _ := hwCall(t, cs, "ptz.move_continuous", args)
+	var d struct {
+		Executed   bool   `json:"executed"`
+		DryRun     bool   `json:"dry_run"`
+		StoppedBy  string `json:"stopped_by"`
+		StopStatus string `json:"stop_status"`
+	}
+	_ = json.Unmarshal(env.Data, &d)
+	if env.Error != nil || d.Executed || !d.DryRun {
+		t.Fatalf("default call must be a dry run that does not execute (error present: %t)", env.Error != nil)
+	}
+
+	args["dry_run"] = false
+	env, _ = hwCall(t, cs, "ptz.move_continuous", args)
+	if env.Error != nil {
+		t.Fatalf("real move failed: %s (call ptz.stop and check the camera by hand)", env.Error.Code)
+	}
+	d = struct {
+		Executed   bool   `json:"executed"`
+		DryRun     bool   `json:"dry_run"`
+		StoppedBy  string `json:"stopped_by"`
+		StopStatus string `json:"stop_status"`
+	}{}
+	_ = json.Unmarshal(env.Data, &d)
+	if !d.Executed || d.StoppedBy != "deadline" {
+		t.Errorf("executed=%t stopped_by=%s", d.Executed, d.StoppedBy)
+	}
+	t.Logf("ptz.move_continuous: stopped_by=%s stop_status=%s", d.StoppedBy, d.StopStatus)
 }
